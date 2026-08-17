@@ -70,3 +70,36 @@
 - mypy
 
 V1 不要求 Kubernetes、Kafka、Flink、Neo4j、独立向量数据库或多 Agent 框架。
+
+## 本地开发与质量门禁
+
+需要 Python 3.12.13 和 `make`。首次设置本地环境：
+
+```bash
+python3.12 -m venv .venv
+make install-dev
+```
+
+提交前运行与 CI 完全相同的质量门禁：
+
+```bash
+make check
+```
+
+`make check` 依次检查依赖闭包并运行单元/集成测试、Ruff 和 mypy。也可以单独运行：
+
+```bash
+make test
+make lint
+make typecheck
+make dependency-check
+```
+
+聚焦运行某个 pytest 目标：
+
+```bash
+make test PYTEST_ARGS="tests/unit/test_health.py -v"
+```
+
+CI 使用 `requirements-dev.lock` 中的精确依赖版本、固定的 Python 补丁版本
+和固定提交的 GitHub Actions。更新依赖时必须显式审查并重新生成锁文件。
