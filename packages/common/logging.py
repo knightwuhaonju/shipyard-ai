@@ -2,10 +2,11 @@
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 REDACTED = "[REDACTED]"
+_UNSERIALIZABLE = "[UNSERIALIZABLE]"
 
 _SENSITIVE_KEY_SUFFIXES = (
     "password",
@@ -15,7 +16,11 @@ _SENSITIVE_KEY_SUFFIXES = (
     "cookie",
     "api_key",
     "database_url",
+    "credential",
+    "credentials",
 )
+
+_CANONICAL_FIELDS = frozenset({"timestamp", "level", "logger", "message"})
 
 _OMITTED_FIELD_NAMES = frozenset(
     {
@@ -34,8 +39,10 @@ _OMITTED_FIELD_NAMES = frozenset(
 _PROHIBITED_FIELD_TOKENS = frozenset(
     {"body", "bodies", "header", "headers", "query", "queries", "customer"}
 )
-_STANDARD_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | (
-    _OMITTED_FIELD_NAMES
+_STANDARD_RECORD_FIELDS = (
+    frozenset(logging.makeLogRecord({}).__dict__)
+    | _OMITTED_FIELD_NAMES
+    | _CANONICAL_FIELDS
 )
 
 
@@ -45,10 +52,10 @@ def redact(value: object) -> object:
         return REDACTED
     if isinstance(value, Mapping):
         return _redact_mapping(value)
-    if isinstance(value, list):
-        return [redact(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact(item) for item in value)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [redact(item) for item in value]
     return value
 
 
@@ -83,7 +90,11 @@ class JsonFormatter(logging.Formatter):
             if key not in _STANDARD_RECORD_FIELDS
         }
         payload.update(_redact_mapping(extras))
-        return json.dumps(payload, default=str)
+        return json.dumps(payload, default=_safe_json_fallback)
+
+
+def _safe_json_fallback(_value: object) -> str:
+    return _UNSERIALIZABLE
 
 
 def _is_prohibited_field_name(key: object) -> bool:
@@ -108,7 +119,7 @@ def _contains_exception(value: object) -> bool:
         return True
     if isinstance(value, Mapping):
         return any(_contains_exception(item) for item in value.values())
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return any(_contains_exception(item) for item in value)
     return False
 
@@ -118,6 +129,7 @@ def configure_logging(level: str) -> logging.Logger:
     logger = logging.getLogger("shipyard_ai")
     logger.setLevel(level.upper())
     logger.propagate = False
+    logging.getLogger("shipyard_ai.request").setLevel(logging.INFO)
     has_json_handler = any(
         isinstance(handler.formatter, JsonFormatter) for handler in logger.handlers
     )

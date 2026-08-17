@@ -44,8 +44,11 @@ factory to inject valid settings where startup behavior is not under test.
    password, token, authorization, cookie, API-key, and database-URL fields are
    replaced by the literal `[REDACTED]`.
 2. A JSON formatter that emits UTC timestamp, severity, logger name, message,
-   and sanitized structured fields.
-3. Idempotent logging configuration at the requested level.
+   and sanitized structured fields. Canonical envelope names cannot be replaced
+   by extras, and unsupported objects use a fixed non-content fallback.
+3. Idempotent general logging configuration at the requested level. The
+   request-audit logger remains at `INFO` so every supported `LOG_LEVEL` emits
+   one completion or failure record through the same sanitized handler.
 
 Redaction operates on structured fields. The application never places raw
 environment values, headers, query strings, request bodies, or customer data
@@ -53,22 +56,26 @@ in a log message.
 
 ## Request Flow
 
-For every HTTP request, FastAPI middleware:
+For every HTTP request, pure ASGI middleware:
 
 1. Reads `X-Request-ID`.
 2. Reuses it only when it contains 1-128 ASCII letters, digits, dots,
    underscores, or hyphens.
 3. Generates a UUID when the header is absent or invalid.
 4. Measures elapsed time with a monotonic clock.
-5. Emits one structured completion log containing request ID, method, matched
-   route template, status code, and duration in milliseconds. Unmatched routes
-   use a fixed placeholder; raw URL paths are never logged.
+5. Owns response-start and body delivery through the complete ASGI lifecycle,
+   then emits one structured completion log containing request ID, method,
+   matched route template, status code, and duration in milliseconds. Unmatched
+   routes use a fixed placeholder; raw URL paths are never logged.
 6. Adds `X-Request-ID` to the response.
 
 If request processing raises an unhandled exception, the middleware logs the
 exception class and a status code of 500, then returns a sanitized generic 500
 response with `X-Request-ID`. It does not log or re-raise the exception because
 exception text could contain sensitive data.
+
+The deployment disables Uvicorn's raw access logger; sanitized application
+request records are the only HTTP access records emitted by the default image.
 
 The `/health` response body remains unchanged. Its `X-Request-ID` response
 header is documented in the generated OpenAPI contract and in the README.

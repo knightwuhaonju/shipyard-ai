@@ -85,7 +85,8 @@ V1 不要求 Kubernetes、Kafka、Flink、Neo4j、独立向量数据库或多 Ag
 
 请求日志采用结构化格式，并只记录安全的请求元数据，例如方法、路由模板、状态码、耗时和
 请求 ID。日志不记录请求或响应头、查询参数、请求体、原始 URL 路径、客户数据或异常消息。
-请求失败时，客户端收到通用的 `500 Internal Server Error` 响应以及 `X-Request-ID`。
+默认容器会禁用 Uvicorn 原始访问日志；请求审计日志不受通用 `LOG_LEVEL` 抑制。请求失败时，
+客户端收到通用的 `500 Internal Server Error` 响应以及 `X-Request-ID`。
 
 ## 本地开发与质量门禁
 

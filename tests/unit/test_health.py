@@ -1,12 +1,14 @@
 import logging
+from collections.abc import AsyncIterator
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.responses import StreamingResponse
 
 from apps.api.main import create_app
-from packages.common.config import Settings
+from packages.common.config import LogLevel, Settings
 
 TEST_SETTINGS = Settings(
     database_url=SecretStr("postgresql://test:test@localhost/test")
@@ -121,6 +123,71 @@ def test_failure_logs_safe_request_failure() -> None:
     assert getattr(record, "status_code") == 500
     assert getattr(record, "error_class") == "RuntimeError"
     assert "do-not-print" not in repr(record.__dict__)
+
+
+@pytest.mark.parametrize(
+    "log_level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+)
+def test_request_audit_records_are_emitted_at_every_supported_log_level(
+    log_level: LogLevel,
+) -> None:
+    settings = Settings(
+        database_url=SecretStr("postgresql://test:test@localhost/test"),
+        log_level=log_level,
+    )
+    application = create_app(settings)
+
+    @application.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("do-not-print")
+
+    logger = logging.getLogger("shipyard_ai.request")
+    handler = CollectingHandler()
+    logger.addHandler(handler)
+    try:
+        with TestClient(application) as client:
+            assert client.get("/health").status_code == 200
+            assert client.get("/boom").status_code == 500
+    finally:
+        logger.removeHandler(handler)
+
+    assert [record.getMessage() for record in handler.records] == [
+        "request_completed",
+        "request_failed",
+    ]
+
+
+def test_streaming_failure_returns_sanitized_500_without_false_completion() -> None:
+    application = create_app(TEST_SETTINGS)
+
+    async def broken_stream() -> AsyncIterator[bytes]:
+        if False:
+            yield b"never-sent"
+        raise RuntimeError("stream-do-not-print")
+
+    @application.get("/stream/{ship_id}")
+    def stream(ship_id: str) -> StreamingResponse:
+        return StreamingResponse(broken_stream())
+
+    logger = logging.getLogger("shipyard_ai.request")
+    handler = CollectingHandler()
+    logger.addHandler(handler)
+    try:
+        with TestClient(application) as client:
+            response = client.get("/stream/customer-secret-123")
+    finally:
+        logger.removeHandler(handler)
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert UUID(response.headers["X-Request-ID"]).version == 4
+    assert [record.getMessage() for record in handler.records] == ["request_failed"]
+    record = handler.records[0]
+    assert getattr(record, "path") == "/stream/{ship_id}"
+    assert getattr(record, "error_class") == "RuntimeError"
+    assert "customer-secret-123" not in repr(record.__dict__)
+    assert "stream-do-not-print" not in repr(record.__dict__)
+    assert "stream-do-not-print" not in response.text
 
 
 def test_request_log_uses_route_template_without_dynamic_path_value() -> None:
