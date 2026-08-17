@@ -87,3 +87,56 @@ def test_auth_contracts_are_immutable_and_reject_unknown_fields() -> None:
         UserContext.model_validate(
             {"user_id": "user-001", "model_supplied_role": "admin"}
         )
+
+
+def test_authorization_service_derives_scope_from_authenticated_context() -> None:
+    from packages.contracts.auth import AuthorizationScope, SecurityLevel, UserContext
+    from services.auth.service import authorization_scope_for
+
+    user = UserContext(
+        user_id="user-001",
+        roles={"engineering"},
+        departments={"design"},
+        allowed_ship_ids={"ship-001"},
+        allowed_project_ids={"project-001"},
+        security_clearance=SecurityLevel.CONFIDENTIAL,
+    )
+
+    assert authorization_scope_for(user) == AuthorizationScope(
+        roles={"engineering"},
+        departments={"design"},
+        allowed_ship_ids={"ship-001"},
+        allowed_project_ids={"project-001"},
+        security_level=SecurityLevel.CONFIDENTIAL,
+    )
+
+
+def test_requested_scope_cannot_expand_authenticated_permissions() -> None:
+    from packages.contracts.auth import AuthorizationScope, SecurityLevel, UserContext
+    from services.auth.service import authorization_scope_for
+
+    user = UserContext(
+        user_id="user-001",
+        roles={"engineering"},
+        departments={"design"},
+        allowed_ship_ids={"ship-001"},
+        allowed_project_ids={"project-001"},
+        security_clearance=SecurityLevel.INTERNAL,
+    )
+    requested = AuthorizationScope(
+        roles={"engineering", "admin"},
+        departments={"design", "executive"},
+        allowed_ship_ids={"ship-001", "ship-999"},
+        allowed_project_ids={"project-001", "project-999"},
+        security_level=SecurityLevel.RESTRICTED,
+    )
+
+    result = authorization_scope_for(user, requested)
+
+    assert result == AuthorizationScope(
+        roles={"engineering"},
+        departments={"design"},
+        allowed_ship_ids={"ship-001"},
+        allowed_project_ids={"project-001"},
+        security_level=SecurityLevel.INTERNAL,
+    )
