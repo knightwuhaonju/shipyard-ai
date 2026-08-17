@@ -26,6 +26,11 @@ V1 supports:
 
 AuthorizationScope is computed server-side from authenticated identity.
 
+Security levels are ordered PUBLIC < INTERNAL < CONFIDENTIAL < RESTRICTED.
+The default AuthorizationScope contains no allowed roles, departments, ships,
+or projects. Intersecting scopes intersects each allowed set and uses the lower
+security level, so narrowing can never increase access.
+
 Retrieval:
 
 AuthorizationScope -> permitted documents/chunks -> ranking

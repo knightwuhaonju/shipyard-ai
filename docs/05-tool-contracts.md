@@ -5,6 +5,11 @@ All tools receive an authenticated `UserContext`. User identity is injected by t
 ## Common types
 
 ```text
+UserContext is an immutable, already-authenticated server-side value. The host
+injects it through a parameter separate from model-generated tool arguments.
+Tool schemas must not expose user_id, roles, departments, allowed_ship_ids,
+allowed_project_ids, or security_clearance as identity overrides.
+
 UserContext
 - user_id
 - roles[]
@@ -12,6 +17,13 @@ UserContext
 - allowed_ship_ids[]
 - allowed_project_ids[]
 - security_clearance
+
+AuthorizationScope
+- roles[]
+- departments[]
+- allowed_ship_ids[]
+- allowed_project_ids[]
+- security_level
 
 ToolEvidence
 - source_system
