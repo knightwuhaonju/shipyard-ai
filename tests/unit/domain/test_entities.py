@@ -1,6 +1,9 @@
+import ast
+import sys
 from dataclasses import FrozenInstanceError
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, TypedDict, cast
 from uuid import UUID
 
@@ -457,4 +460,131 @@ def test_operational_text_and_progress_fields_reject_unvalidated_values() -> Non
             task_code="TASK-001",
             name="Synthetic task",
             planned_progress=cast(Any, Decimal("0.5")),
+        )
+
+
+def test_public_domain_api_exports_all_task_005_types() -> None:
+    import packages.domain as domain
+
+    expected = {
+        "BOMItem",
+        "DomainValidationError",
+        "Drawing",
+        "Equipment",
+        "Material",
+        "PositiveQuantity",
+        "Progress",
+        "ProjectTask",
+        "PurchaseOrder",
+        "Ship",
+        "ShipSystem",
+        "Supplier",
+    }
+
+    assert set(domain.__all__) == expected
+    assert all(hasattr(domain, name) for name in expected)
+
+
+def test_all_nine_entities_expose_direct_source_fields() -> None:
+    from packages.domain.entities import (
+        BOMItem,
+        Drawing,
+        Equipment,
+        Material,
+        ProjectTask,
+        PurchaseOrder,
+        Ship,
+        ShipSystem,
+        Supplier,
+    )
+    from packages.domain.value_objects import PositiveQuantity
+
+    entities = (
+        Ship(**_source_fields(SHIP_ID, "ship"), ship_code="SHIP-001"),
+        ShipSystem(
+            **_source_fields(SYSTEM_ID, "system"),
+            ship_id=SHIP_ID,
+            system_code="SYS-001",
+            name="Synthetic system",
+        ),
+        Drawing(
+            **_source_fields(DRAWING_ID, "drawing"),
+            ship_id=SHIP_ID,
+            drawing_no="DWG-001",
+            title="Synthetic drawing",
+            revision="A",
+        ),
+        Equipment(
+            **_source_fields(EQUIPMENT_ID, "equipment"),
+            ship_id=SHIP_ID,
+            equipment_code="EQ-001",
+        ),
+        Material(
+            **_source_fields(MATERIAL_ID, "material"),
+            material_code="MAT-001",
+            description="Synthetic material",
+        ),
+        BOMItem(
+            **_source_fields(BOM_ITEM_ID, "bom"),
+            drawing_id=DRAWING_ID,
+            material_id=MATERIAL_ID,
+            quantity=PositiveQuantity(Decimal("1")),
+        ),
+        Supplier(
+            **_source_fields(SUPPLIER_ID, "supplier"),
+            supplier_code="SUP-001",
+            canonical_name="Synthetic supplier",
+        ),
+        PurchaseOrder(
+            **_source_fields(PURCHASE_ORDER_ID, "po"),
+            ship_id=SHIP_ID,
+            material_id=MATERIAL_ID,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-001",
+            status="OPEN",
+        ),
+        ProjectTask(
+            **_source_fields(PROJECT_TASK_ID, "task"),
+            ship_id=SHIP_ID,
+            task_code="TASK-001",
+            name="Synthetic task",
+        ),
+    )
+
+    for entity in entities:
+        assert isinstance(entity.id, UUID)
+        assert entity.source_system == "synthetic-erp"
+        assert entity.source_id
+        assert entity.source_updated_at is SOURCE_UPDATED_AT
+
+
+def test_entities_are_immutable() -> None:
+    from packages.domain.entities import Ship
+
+    ship = Ship(**_source_fields(SHIP_ID, "ship"), ship_code="SHIP-001")
+
+    with pytest.raises(FrozenInstanceError):
+        cast(Any, ship).ship_code = "CHANGED"
+
+
+def test_domain_modules_use_only_standard_library_and_domain_imports() -> None:
+    domain_root = Path(__file__).resolve().parents[3] / "packages" / "domain"
+    allowed_roots = set(sys.stdlib_module_names) | {"__future__", "packages"}
+
+    for module_path in domain_root.glob("*.py"):
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        imported_roots = {
+            alias.name.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            (node.module or "").split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+        }
+
+        assert imported_roots <= allowed_roots, (
+            f"{module_path.name} imports non-domain dependency roots: "
+            f"{sorted(imported_roots - allowed_roots)}"
         )
