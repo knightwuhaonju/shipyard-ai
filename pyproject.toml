@@ -25,7 +25,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["apps*"]
+include = ["apps*", "packages*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
