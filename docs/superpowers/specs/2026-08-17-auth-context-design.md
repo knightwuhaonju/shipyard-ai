@@ -130,15 +130,20 @@ unit and relevant integration suites, `ruff check .`, and `mypy .`.
 - `adapters/auth/__init__.py`
 - `adapters/auth/local.py`
 - `tests/unit/test_authorization_scope.py`
+- `tests/integration/test_deployment.py`
 - `docs/05-tool-contracts.md`
 - `docs/06-security.md`
 - `docs/superpowers/plans/2026-08-17-auth-context.md`
 - `pyproject.toml`
+- `Dockerfile`
 
 The package marker files are included only where required for packaging and
 static analysis. `pyproject.toml` adds `services*` and `adapters*` to package
-discovery because Task 004 introduces those top-level packages. No schema
-migration or new runtime dependency is required.
+discovery because Task 004 introduces those top-level packages. `Dockerfile`
+copies both package trees into its build context, and the deployment packaging
+test verifies that the installed artifact can import the new public contracts,
+service, and adapter from an isolated directory. No schema migration or new
+runtime dependency is required.
 
 ## Acceptance Mapping
 
