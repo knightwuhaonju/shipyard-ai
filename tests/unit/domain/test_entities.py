@@ -567,12 +567,26 @@ def test_entities_are_immutable() -> None:
         cast(Any, ship).ship_code = "CHANGED"
 
 
-def test_domain_modules_use_only_standard_library_and_domain_imports() -> None:
-    domain_root = Path(__file__).resolve().parents[3] / "packages" / "domain"
+def _assert_domain_imports_allowed(domain_root: Path) -> None:
     allowed_roots = set(sys.stdlib_module_names) | {"__future__", "packages"}
 
-    for module_path in domain_root.glob("*.py"):
+    for module_path in domain_root.rglob("*.py"):
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        importlib_module_names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "importlib"
+        }
+        import_module_names = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            if node.module == "importlib"
+            for alias in node.names
+            if alias.name == "import_module"
+        }
         imported_roots = {
             alias.name.split(".", 1)[0]
             for node in ast.walk(tree)
@@ -583,8 +597,52 @@ def test_domain_modules_use_only_standard_library_and_domain_imports() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom)
         }
+        imported_roots |= {
+            node.args[0].value.split(".", 1)[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"__import__", *import_module_names}
+                or isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in importlib_module_names
+                and node.func.attr == "import_module"
+            )
+        }
 
         assert imported_roots <= allowed_roots, (
             f"{module_path.name} imports non-domain dependency roots: "
             f"{sorted(imported_roots - allowed_roots)}"
         )
+
+
+def test_domain_modules_use_only_standard_library_and_domain_imports() -> None:
+    domain_root = Path(__file__).resolve().parents[3] / "packages" / "domain"
+
+    _assert_domain_imports_allowed(domain_root)
+
+
+def test_domain_import_guard_rejects_nested_third_party_import(tmp_path: Path) -> None:
+    nested_module = tmp_path / "nested" / "module.py"
+    nested_module.parent.mkdir()
+    nested_module.write_text("import fastapi\n", encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="module.py.*fastapi"):
+        _assert_domain_imports_allowed(tmp_path)
+
+
+def test_domain_import_guard_rejects_dynamic_third_party_import(
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "module.py"
+    module_path.write_text(
+        'import importlib\nimportlib.import_module("fastapi")\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="module.py.*fastapi"):
+        _assert_domain_imports_allowed(tmp_path)
