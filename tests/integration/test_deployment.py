@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import site
 import socket
 import subprocess
 import sys
@@ -139,7 +140,7 @@ def _build_package_artifact(build_context: Path, wheel: Path) -> None:
         archive.writestr(f"{dist_info}/RECORD", "")
 
 
-def test_docker_build_inputs_install_common_package_artifact(tmp_path: Path) -> None:
+def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) -> None:
     build_context = tmp_path / "build-context"
     wheel = tmp_path / "shipyard_ai-0.1.0-py3-none-any.whl"
     install_target = tmp_path / "installed"
@@ -169,13 +170,20 @@ def test_docker_build_inputs_install_common_package_artifact(tmp_path: Path) -> 
     assert installation.returncode == 0, installation.stdout + installation.stderr
 
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(install_target)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(install_target), *site.getsitepackages()]
+    )
     smoke = subprocess.run(
         [
             sys.executable,
             "-S",
             "-c",
-            "from packages.common.logging import REDACTED; print(REDACTED)",
+            "from adapters.auth.local import LocalAuthenticationAdapter; "
+            "from packages.common.logging import REDACTED; "
+            "from packages.contracts.auth import AuthorizationScope; "
+            "from services.auth.service import authorization_scope_for; "
+            "print(REDACTED, AuthorizationScope.__name__, "
+            "LocalAuthenticationAdapter.__name__, authorization_scope_for.__name__)",
         ],
         cwd=isolated_cwd,
         env=environment,
@@ -185,7 +193,10 @@ def test_docker_build_inputs_install_common_package_artifact(tmp_path: Path) -> 
     )
 
     assert smoke.returncode == 0, smoke.stdout + smoke.stderr
-    assert smoke.stdout.strip() == "[REDACTED]"
+    assert smoke.stdout.strip() == (
+        "[REDACTED] AuthorizationScope LocalAuthenticationAdapter "
+        "authorization_scope_for"
+    )
 
 
 _COMPOSE_DEFAULT = re.compile(r"\$\{([A-Z][A-Z0-9_]*):-([^}]*)\}")
