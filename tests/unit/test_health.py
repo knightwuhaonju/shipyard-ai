@@ -1,13 +1,17 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.datastructures import Headers
 from starlette.responses import StreamingResponse
+from starlette.types import Message, Receive, Scope, Send
 
-from apps.api.main import create_app
+from apps.api.main import RequestLoggingMiddleware, create_app
 from packages.common.config import LogLevel, Settings
 
 TEST_SETTINGS = Settings(
@@ -188,6 +192,99 @@ def test_streaming_failure_returns_sanitized_500_without_false_completion() -> N
     assert "customer-secret-123" not in repr(record.__dict__)
     assert "stream-do-not-print" not in repr(record.__dict__)
     assert "stream-do-not-print" not in response.text
+
+
+def test_streaming_failure_after_body_start_is_safely_completed_and_audited() -> None:
+    application = create_app(TEST_SETTINGS)
+
+    async def broken_stream() -> AsyncIterator[bytes]:
+        yield b"safe-prefix"
+        raise RuntimeError("late-stream-do-not-print")
+
+    @application.get("/stream-started/{ship_id}")
+    def stream(ship_id: str) -> StreamingResponse:
+        return StreamingResponse(broken_stream())
+
+    request_logger = logging.getLogger("shipyard_ai.request")
+    server_logger = logging.getLogger()
+    request_handler = CollectingHandler()
+    server_handler = CollectingHandler()
+    request_logger.addHandler(request_handler)
+    server_logger.addHandler(server_handler)
+    try:
+        with TestClient(application) as client:
+            response = client.get(
+                "/stream-started/customer-secret-123",
+                headers={"X-Request-ID": "stream-request-123"},
+            )
+    finally:
+        request_logger.removeHandler(request_handler)
+        server_logger.removeHandler(server_handler)
+
+    assert response.status_code == 200
+    assert response.content == b"safe-prefix"
+    assert response.headers["X-Request-ID"] == "stream-request-123"
+    assert [record.getMessage() for record in request_handler.records] == [
+        "request_failed"
+    ]
+    record = request_handler.records[0]
+    assert getattr(record, "request_id") == "stream-request-123"
+    assert getattr(record, "path") == "/stream-started/{ship_id}"
+    assert getattr(record, "error_class") == "RuntimeError"
+    assert "customer-secret-123" not in repr(record.__dict__)
+    assert "late-stream-do-not-print" not in repr(record.__dict__)
+    assert "late-stream-do-not-print" not in repr(
+        [record.__dict__ for record in server_handler.records]
+    )
+
+
+def test_pending_response_flush_send_failure_is_safely_contained() -> None:
+    async def start_only_app(scope: Scope, receive: Receive, send: Send) -> None:
+        scope["route"] = SimpleNamespace(path="/flush/{item_id}")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 204,
+                "headers": [],
+            }
+        )
+
+    scope: Scope = {
+        "type": "http",
+        "method": "GET",
+        "headers": [(b"x-request-id", b"flush-request-123")],
+    }
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    async def failing_send(message: Message) -> None:
+        sent.append(message)
+        if message["type"] == "http.response.body":
+            raise RuntimeError("send-do-not-print")
+
+    logger = logging.getLogger("shipyard_ai.request")
+    handler = CollectingHandler()
+    logger.addHandler(handler)
+    try:
+        asyncio.run(
+            RequestLoggingMiddleware(start_only_app)(scope, receive, failing_send)
+        )
+    finally:
+        logger.removeHandler(handler)
+
+    assert [message["type"] for message in sent] == [
+        "http.response.start",
+        "http.response.body",
+    ]
+    assert Headers(raw=sent[0]["headers"])["X-Request-ID"] == "flush-request-123"
+    assert [record.getMessage() for record in handler.records] == ["request_failed"]
+    record = handler.records[0]
+    assert getattr(record, "request_id") == "flush-request-123"
+    assert getattr(record, "path") == "/flush/{item_id}"
+    assert getattr(record, "error_class") == "RuntimeError"
+    assert "send-do-not-print" not in repr(record.__dict__)
 
 
 def test_request_log_uses_route_template_without_dynamic_path_value() -> None:

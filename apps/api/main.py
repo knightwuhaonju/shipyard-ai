@@ -53,7 +53,16 @@ class RequestLoggingMiddleware:
         pending_start: Message | None = None
         response_started = False
         response_finished = False
+        send_failed = False
         status_code = 500
+
+        async def send_outbound(message: Message) -> None:
+            nonlocal send_failed
+            try:
+                await send(message)
+            except Exception:
+                send_failed = True
+                raise
 
         async def send_with_request_id(message: Message) -> None:
             nonlocal pending_start, response_started, response_finished, status_code
@@ -66,19 +75,29 @@ class RequestLoggingMiddleware:
                 return
             if message["type"] == "http.response.body":
                 if pending_start is not None:
-                    await send(pending_start)
+                    await send_outbound(pending_start)
                     pending_start = None
                     response_started = True
-                await send(message)
+                await send_outbound(message)
                 if not message.get("more_body", False):
                     response_finished = True
                 return
-            await send(message)
+            await send_outbound(message)
 
         try:
             await self.app(scope, receive, send_with_request_id)
+            if pending_start is not None:
+                await send_outbound(pending_start)
+                pending_start = None
+                response_started = True
+                await send_outbound(
+                    {"type": "http.response.body", "body": b"", "more_body": False}
+                )
+                response_finished = True
         except Exception as exc:
             _log_request_failure(scope, request_id, started_at, exc)
+            if send_failed:
+                return
             if not response_started:
                 response = PlainTextResponse(
                     "Internal Server Error",
@@ -86,22 +105,18 @@ class RequestLoggingMiddleware:
                     headers={"X-Request-ID": request_id},
                 )
                 try:
-                    await response(scope, receive, send)
+                    await response(scope, receive, send_outbound)
                 except Exception:
                     pass
             elif not response_finished:
                 try:
-                    await send(
+                    await send_outbound(
                         {"type": "http.response.body", "body": b"", "more_body": False}
                     )
                 except Exception:
                     pass
             return
 
-        if pending_start is not None:
-            await send(pending_start)
-            await send({"type": "http.response.body", "body": b"", "more_body": False})
-            response_finished = True
         if response_finished:
             REQUEST_LOGGER.info(
                 "request_completed",
