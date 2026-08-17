@@ -109,3 +109,59 @@ def test_json_formatter_does_not_interpolate_exception_arguments() -> None:
     rendered = JsonFormatter().format(record)
 
     assert "never-print" not in rendered
+
+
+def test_json_formatter_redacts_sensitive_direct_extra_fields() -> None:
+    from packages.common.logging import REDACTED, JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request", logging.INFO, __file__, 1, "request_completed", (), None
+    )
+    record.authorization = "Bearer never-print"
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert payload["authorization"] == REDACTED
+    assert "never-print" not in json.dumps(payload)
+
+
+def test_json_formatter_omits_reserved_field_name_variants_recursively() -> None:
+    from packages.common.logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request", logging.INFO, __file__, 1, "request_completed", (), None
+    )
+    record.request_body = {"ship_id": "never-print"}
+    record.query_params = "ship_id=never-print"
+    record.context = {
+        "body": {"ship_id": "never-print"},
+        "request-headers": {"Authorization": "Bearer never-print"},
+        "customer_data": {"name": "never-print"},
+        "safe": "kept",
+    }
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert "request_body" not in payload
+    assert "query_params" not in payload
+    assert payload["context"] == {"safe": "kept"}
+    assert "never-print" not in json.dumps(payload)
+
+
+def test_json_formatter_does_not_interpolate_sensitive_message_arguments() -> None:
+    from packages.common.logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request",
+        logging.INFO,
+        __file__,
+        1,
+        "request_completed: %s",
+        ({"authorization": "Bearer never-print"},),
+        None,
+    )
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert payload["message"] == "request_completed: %s"
+    assert "never-print" not in json.dumps(payload)

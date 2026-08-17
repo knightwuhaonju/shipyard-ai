@@ -31,6 +31,9 @@ _OMITTED_FIELD_NAMES = frozenset(
         "stack_info",
     }
 )
+_PROHIBITED_FIELD_TOKENS = frozenset(
+    {"body", "bodies", "header", "headers", "query", "queries", "customer"}
+)
 _STANDARD_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__) | (
     _OMITTED_FIELD_NAMES
 )
@@ -41,15 +44,20 @@ def redact(value: object) -> object:
     if isinstance(value, BaseException):
         return REDACTED
     if isinstance(value, Mapping):
-        return {
-            key: REDACTED if _is_sensitive_key(key) else redact(item)
-            for key, item in value.items()
-        }
+        return _redact_mapping(value)
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact(item) for item in value)
     return value
+
+
+def _redact_mapping(value: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: REDACTED if _is_sensitive_key(key) else redact(item)
+        for key, item in value.items()
+        if not _is_prohibited_field_name(key)
+    }
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -69,25 +77,28 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": _safe_message(record),
         }
-        payload.update(
-            {
-                key: redact(value)
-                for key, value in record.__dict__.items()
-                if key not in _STANDARD_RECORD_FIELDS and not _is_omitted_field(key)
-            }
-        )
+        extras = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _STANDARD_RECORD_FIELDS
+        }
+        payload.update(_redact_mapping(extras))
         return json.dumps(payload, default=str)
 
 
-def _is_omitted_field(key: object) -> bool:
+def _is_prohibited_field_name(key: object) -> bool:
     if not isinstance(key, str):
         return False
     normalized = key.lower().replace("-", "_")
-    return normalized in _OMITTED_FIELD_NAMES or normalized.startswith("customer")
+    return (
+        normalized in _OMITTED_FIELD_NAMES
+        or normalized.startswith("customer")
+        or bool(set(normalized.split("_")) & _PROHIBITED_FIELD_TOKENS)
+    )
 
 
 def _safe_message(record: logging.LogRecord) -> str:
-    if _contains_exception(record.msg) or _contains_exception(record.args):
+    if record.args or _contains_exception(record.msg):
         return record.msg if isinstance(record.msg, str) else REDACTED
     return record.getMessage()
 
