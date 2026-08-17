@@ -573,11 +573,11 @@ def _assert_domain_imports_allowed(domain_root: Path) -> None:
     for module_path in domain_root.rglob("*.py"):
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
         importlib_module_names = {
-            alias.asname or alias.name
+            alias.asname or alias.name.split(".", 1)[0]
             for node in ast.walk(tree)
             if isinstance(node, ast.Import)
             for alias in node.names
-            if alias.name == "importlib"
+            if alias.name.split(".", 1)[0] == "importlib"
         }
         import_module_names = {
             alias.asname or alias.name
@@ -643,6 +643,24 @@ def test_domain_import_guard_rejects_dynamic_third_party_import(
         'import importlib\nimportlib.import_module("fastapi")\n',
         encoding="utf-8",
     )
+
+    with pytest.raises(AssertionError, match="module.py.*fastapi"):
+        _assert_domain_imports_allowed(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import importlib.util\nimportlib.import_module("fastapi")\n',
+        'import importlib.util as loader\nloader.import_module("fastapi")\n',
+    ],
+)
+def test_domain_import_guard_rejects_importlib_submodule_bindings(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    module_path = tmp_path / "module.py"
+    module_path.write_text(source, encoding="utf-8")
 
     with pytest.raises(AssertionError, match="module.py.*fastapi"):
         _assert_domain_imports_allowed(tmp_path)
