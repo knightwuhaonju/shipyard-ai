@@ -15,11 +15,18 @@ from packages.common.logging import configure_logging
 
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}", re.ASCII)
 REQUEST_LOGGER = logging.getLogger("shipyard_ai.request")
+UNMATCHED_ROUTE_TEMPLATE = "<unmatched>"
 
 
 class HealthResponse(BaseModel):
     service: Literal["shipyard-ai-api"]
     status: Literal["ok"]
+
+
+def _route_template(request: Request) -> str:
+    route_path = getattr(request.scope.get("route"), "path", None)
+    return route_path if isinstance(route_path, str) else UNMATCHED_ROUTE_TEMPLATE
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
@@ -30,14 +37,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     application = FastAPI(title="Shipyard AI API", lifespan=lifespan)
-
-    @application.exception_handler(Exception)
-    async def internal_server_error(request: Request, _: Exception) -> Response:
-        return PlainTextResponse(
-            "Internal Server Error",
-            status_code=500,
-            headers={"X-Request-ID": request.state.request_id},
-        )
 
     @application.middleware("http")
     async def add_request_id(
@@ -61,7 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 extra={
                     "request_id": request_id,
                     "method": request.method,
-                    "path": request.url.path,
+                    "path": _route_template(request),
                     "status_code": 500,
                     "duration_ms": round(
                         max(0, (time.perf_counter() - started_at) * 1000)
@@ -69,14 +68,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "error_class": type(exc).__name__,
                 },
             )
-            raise
+            return PlainTextResponse(
+                "Internal Server Error",
+                status_code=500,
+                headers={"X-Request-ID": request_id},
+            )
         response.headers["X-Request-ID"] = request_id
         REQUEST_LOGGER.info(
             "request_completed",
             extra={
                 "request_id": request_id,
                 "method": request.method,
-                "path": request.url.path,
+                "path": _route_template(request),
                 "status_code": response.status_code,
                 "duration_ms": round(max(0, (time.perf_counter() - started_at) * 1000)),
             },

@@ -4,7 +4,7 @@
 
 **Goal:** Add typed environment configuration and secret-safe structured request logging to the FastAPI service.
 
-**Architecture:** Pydantic configuration and standard-library JSON logging live in framework-independent `packages/common`. FastAPI startup and request middleware stay in `apps/api`; startup validates configuration and middleware correlates requests without logging headers, queries, bodies, or secret values.
+**Architecture:** Pydantic configuration and standard-library JSON logging live in framework-independent `packages/common`. FastAPI startup and request middleware stay in `apps/api`; startup validates configuration and middleware correlates requests without logging headers, queries, bodies, raw URL paths, or secret values.
 
 **Tech Stack:** Python 3.12, FastAPI 0.115.x, Pydantic 2.x, pytest 8.x, Ruff 0.9.x, mypy 1.14.x.
 
@@ -304,11 +304,11 @@ assert "Authorization" not in record.__dict__
 
 - [ ] **Step 5: Confirm RED, log completion, and confirm GREEN**
 
-Expected RED: no record exists. Measure with `time.perf_counter()`, then log request ID, method, URL path only, status code, and rounded non-negative milliseconds. Do not add headers, query, body, or client identity. Rerun the focused test.
+Expected RED: no record exists. Measure with `time.perf_counter()`, then log request ID, method, matched route template only, status code, and rounded non-negative milliseconds. Use a fixed placeholder for unmatched routes. Do not add headers, query, body, raw URL paths, or client identity. Rerun the focused test.
 
 - [ ] **Step 6: Cover the sanitized failure path with RED/GREEN**
 
-Register a test-only `/boom` endpoint that raises `RuntimeError("do-not-print")`. Use `TestClient(..., raise_server_exceptions=False)` and assert `request_failed` contains `status_code == 500` and `error_class == "RuntimeError"`, but not the exception message. Confirm RED, implement the error log, re-raise, and confirm GREEN.
+Register a test-only `/boom` endpoint that raises `RuntimeError("do-not-print")`. Use the default `TestClient` exception behavior and assert a generic 500 response with `X-Request-ID`; assert `request_failed` contains `status_code == 500` and `error_class == "RuntimeError"`, but not the exception message. Confirm RED, implement the error log and sanitized response without re-raising, and confirm GREEN.
 
 - [ ] **Step 7: Document the header in OpenAPI and test it**
 
@@ -358,7 +358,7 @@ DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE
 LOG_LEVEL=INFO
 ```
 
-Document in README: required `DATABASE_URL`; allowed `LOG_LEVEL` values and `INFO` default; startup failure on invalid config; the `/health` response's `X-Request-ID`; accepted inbound ID pattern and length; and exclusion of headers, queries, and bodies from request logs.
+Document in README: required `DATABASE_URL`; allowed `LOG_LEVEL` values and `INFO` default; startup failure on invalid config; the `/health` response's `X-Request-ID`; accepted inbound ID pattern and length; and exclusion of headers, queries, bodies, and raw URL paths from request logs.
 
 - [ ] **Step 2: Verify documentation and commit it**
 

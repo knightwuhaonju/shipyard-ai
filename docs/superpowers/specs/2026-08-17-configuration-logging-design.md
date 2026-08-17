@@ -60,14 +60,15 @@ For every HTTP request, FastAPI middleware:
    underscores, or hyphens.
 3. Generates a UUID when the header is absent or invalid.
 4. Measures elapsed time with a monotonic clock.
-5. Emits one structured completion log containing request ID, method, path,
-   status code, and duration in milliseconds.
+5. Emits one structured completion log containing request ID, method, matched
+   route template, status code, and duration in milliseconds. Unmatched routes
+   use a fixed placeholder; raw URL paths are never logged.
 6. Adds `X-Request-ID` to the response.
 
-If an unhandled exception escapes request processing, the middleware logs the
-exception class and a status code of 500, then re-raises it for FastAPI's error
-handling. It does not log the exception message because that text could contain
-sensitive data.
+If request processing raises an unhandled exception, the middleware logs the
+exception class and a status code of 500, then returns a sanitized generic 500
+response with `X-Request-ID`. It does not log or re-raise the exception because
+exception text could contain sensitive data.
 
 The `/health` response body remains unchanged. Its `X-Request-ID` response
 header is documented in the generated OpenAPI contract and in the README.
@@ -79,8 +80,8 @@ header is documented in the generated OpenAPI contract and in the README.
   including the rejected value.
 - Invalid inbound request ID: the value is ignored and replaced; it is never
   logged.
-- Request failure: a sanitized failure record is emitted and the exception is
-  re-raised.
+- Request failure: a sanitized failure record is emitted and a generic 500
+  response with `X-Request-ID` is returned.
 
 ## Testing
 
@@ -91,8 +92,9 @@ Tests exercise real behavior without network or external services:
 - Logging tests cover nested mappings and sequences, case and separator
   variants of sensitive keys, and JSON output that contains no secret value.
 - API tests cover generated request IDs, preservation of valid inbound IDs,
-  replacement of invalid IDs, the response header contract, and structured
-  completion logging without request secrets.
+  replacement of invalid IDs, the response header contract, sanitized 500
+  responses, and structured logging that uses route templates without request
+  secrets.
 - Existing unit and integration tests remain green.
 - Final verification runs dependency closure, pytest, Ruff, and mypy.
 

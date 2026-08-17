@@ -105,12 +105,14 @@ def test_failure_logs_safe_request_failure() -> None:
     handler = CollectingHandler()
     logger.addHandler(handler)
     try:
-        with TestClient(application, raise_server_exceptions=False) as client:
+        with TestClient(application) as client:
             response = client.get("/boom")
     finally:
         logger.removeHandler(handler)
 
     assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert "do-not-print" not in response.text
     assert UUID(response.headers["X-Request-ID"]).version == 4
     assert len(handler.records) == 1
     record = handler.records[0]
@@ -119,6 +121,30 @@ def test_failure_logs_safe_request_failure() -> None:
     assert getattr(record, "status_code") == 500
     assert getattr(record, "error_class") == "RuntimeError"
     assert "do-not-print" not in repr(record.__dict__)
+
+
+def test_request_log_uses_route_template_without_dynamic_path_value() -> None:
+    application = create_app(TEST_SETTINGS)
+
+    @application.get("/ships/{ship_id}")
+    def ship_status(ship_id: str) -> dict[str, str]:
+        return {"status": "ok"}
+
+    secret_ship_id = "customer-secret-123"
+    logger = logging.getLogger("shipyard_ai.request")
+    handler = CollectingHandler()
+    logger.addHandler(handler)
+    try:
+        with TestClient(application) as client:
+            response = client.get(f"/ships/{secret_ship_id}")
+    finally:
+        logger.removeHandler(handler)
+
+    assert response.status_code == 200
+    assert len(handler.records) == 1
+    record = handler.records[0]
+    assert getattr(record, "path") == "/ships/{ship_id}"
+    assert secret_ship_id not in repr(record.__dict__)
 
 
 def test_health_exposes_typed_response_contract() -> None:
