@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-shipyard_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shipyard_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-shipyard}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: >-
+        ${DATABASE_URL:-postgresql+psycopg://shipyard:shipyard_dev@postgres:5432/shipyard_ai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://localhost:8000/health', timeout=2)
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+
+volumes:
+  postgres_data:
