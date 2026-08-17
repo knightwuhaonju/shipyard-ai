@@ -1,5 +1,14 @@
 # Shipyard Domain Model V1
 
+## Canonical types and invariants
+
+- Entity and relationship IDs are internal UUIDs; source IDs remain separate strings.
+- Every entity carries source_system, source_id, and timezone-aware source_updated_at.
+- Business dates use date; quantities use finite positive Decimal values.
+- Progress is a finite Decimal ratio in the inclusive 0.0-1.0 range.
+- Required and present optional text values are non-blank.
+- Entities and constrained values are immutable.
+
 ## Canonical entities
 
 ### Ship
@@ -63,6 +72,7 @@ Represents a shipboard system, such as ballast, fire, HVAC, electrical.
 - material_id
 - quantity
 - source fields
+- BOMItem requires at least one of drawing_id or equipment_id; both are allowed.
 
 ### Supplier
 
@@ -86,6 +96,9 @@ Represents a shipboard system, such as ballast, fire, HVAC, electrical.
 - status
 - criticality optional
 - source fields
+- PurchaseOrder requires at least one of material_id or equipment_id; both are allowed.
+- Purchase-order required, promised, and actual dates preserve source facts and have no ordering invariant.
+- Status and criticality are non-blank strings until a controlled vocabulary is defined.
 
 ### ProjectTask
 
@@ -99,6 +112,7 @@ Represents a shipboard system, such as ballast, fire, HVAC, electrical.
 - actual_progress optional
 - critical_path bool optional
 - source fields
+- ProjectTask planned and actual start dates cannot be after their corresponding end dates.
 
 ## Alias model
 
