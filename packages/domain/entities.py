@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
-from packages.domain.value_objects import DomainValidationError
+from packages.domain.value_objects import (
+    DomainValidationError,
+    PositiveQuantity,
+    Progress,
+)
 
 
 def _require_uuid(field: str, value: object) -> None:
@@ -30,6 +34,29 @@ def _require_optional_text(field: str, value: object | None) -> None:
 def _require_optional_date(field: str, value: object | None) -> None:
     if value is not None and type(value) is not date:
         raise DomainValidationError(f"{field} must be a date")
+
+
+def _require_date_range(
+    prefix: str,
+    start: date | None,
+    end: date | None,
+) -> None:
+    _require_optional_date(f"{prefix}_start", start)
+    _require_optional_date(f"{prefix}_end", end)
+    if start is not None and end is not None and start > end:
+        raise DomainValidationError(f"{prefix}_start cannot be after {prefix}_end")
+
+
+def _require_optional_quantity(value: object | None) -> None:
+    if value is not None and not isinstance(value, PositiveQuantity):
+        raise DomainValidationError(
+            "quantity must be a PositiveQuantity when provided"
+        )
+
+
+def _require_optional_progress(field: str, value: object | None) -> None:
+    if value is not None and not isinstance(value, Progress):
+        raise DomainValidationError(f"{field} must be a Progress when provided")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -143,3 +170,80 @@ class Supplier(_SourcedEntity):
         _SourcedEntity.__post_init__(self)
         _require_text("supplier_code", self.supplier_code)
         _require_text("canonical_name", self.canonical_name)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BOMItem(_SourcedEntity):
+    material_id: UUID
+    quantity: PositiveQuantity
+    drawing_id: UUID | None = None
+    equipment_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        _SourcedEntity.__post_init__(self)
+        _require_uuid("material_id", self.material_id)
+        _require_optional_uuid("drawing_id", self.drawing_id)
+        _require_optional_uuid("equipment_id", self.equipment_id)
+        if self.drawing_id is None and self.equipment_id is None:
+            raise DomainValidationError("BOMItem requires drawing_id or equipment_id")
+        if not isinstance(self.quantity, PositiveQuantity):
+            raise DomainValidationError("quantity must be a PositiveQuantity")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PurchaseOrder(_SourcedEntity):
+    ship_id: UUID
+    supplier_id: UUID
+    po_number: str
+    status: str
+    material_id: UUID | None = None
+    equipment_id: UUID | None = None
+    quantity: PositiveQuantity | None = None
+    required_date: date | None = None
+    promised_date: date | None = None
+    actual_date: date | None = None
+    criticality: str | None = None
+
+    def __post_init__(self) -> None:
+        _SourcedEntity.__post_init__(self)
+        _require_uuid("ship_id", self.ship_id)
+        _require_uuid("supplier_id", self.supplier_id)
+        _require_optional_uuid("material_id", self.material_id)
+        _require_optional_uuid("equipment_id", self.equipment_id)
+        if self.material_id is None and self.equipment_id is None:
+            raise DomainValidationError(
+                "PurchaseOrder requires material_id or equipment_id"
+            )
+        _require_text("po_number", self.po_number)
+        _require_text("status", self.status)
+        _require_optional_quantity(self.quantity)
+        _require_optional_date("required_date", self.required_date)
+        _require_optional_date("promised_date", self.promised_date)
+        _require_optional_date("actual_date", self.actual_date)
+        _require_optional_text("criticality", self.criticality)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProjectTask(_SourcedEntity):
+    ship_id: UUID
+    task_code: str
+    name: str
+    planned_start: date | None = None
+    planned_end: date | None = None
+    actual_start: date | None = None
+    actual_end: date | None = None
+    planned_progress: Progress | None = None
+    actual_progress: Progress | None = None
+    critical_path: bool | None = None
+
+    def __post_init__(self) -> None:
+        _SourcedEntity.__post_init__(self)
+        _require_uuid("ship_id", self.ship_id)
+        _require_text("task_code", self.task_code)
+        _require_text("name", self.name)
+        _require_date_range("planned", self.planned_start, self.planned_end)
+        _require_date_range("actual", self.actual_start, self.actual_end)
+        _require_optional_progress("planned_progress", self.planned_progress)
+        _require_optional_progress("actual_progress", self.actual_progress)
+        if self.critical_path is not None and type(self.critical_path) is not bool:
+            raise DomainValidationError("critical_path must be a bool when provided")

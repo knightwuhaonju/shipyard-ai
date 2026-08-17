@@ -21,6 +21,9 @@ DRAWING_ID = UUID("00000000-0000-0000-0000-000000000003")
 EQUIPMENT_ID = UUID("00000000-0000-0000-0000-000000000004")
 MATERIAL_ID = UUID("00000000-0000-0000-0000-000000000005")
 SUPPLIER_ID = UUID("00000000-0000-0000-0000-000000000006")
+BOM_ITEM_ID = UUID("00000000-0000-0000-0000-000000000007")
+PURCHASE_ORDER_ID = UUID("00000000-0000-0000-0000-000000000008")
+PROJECT_TASK_ID = UUID("00000000-0000-0000-0000-000000000009")
 
 
 def _source_fields(entity_id: UUID, source_id: str) -> _SourceFields:
@@ -270,4 +273,188 @@ def test_business_date_rejects_datetime_values() -> None:
             **_source_fields(SHIP_ID, "erp-ship-001"),
             ship_code="SHIP-001",
             planned_delivery_date=cast(Any, SOURCE_UPDATED_AT),
+        )
+
+
+def test_operational_entities_preserve_relationships_and_provenance() -> None:
+    from packages.domain.entities import BOMItem, ProjectTask, PurchaseOrder
+    from packages.domain.value_objects import PositiveQuantity, Progress
+
+    bom_item = BOMItem(
+        **_source_fields(BOM_ITEM_ID, "plm-bom-001"),
+        drawing_id=DRAWING_ID,
+        equipment_id=EQUIPMENT_ID,
+        material_id=MATERIAL_ID,
+        quantity=PositiveQuantity(Decimal("4.5")),
+    )
+    purchase_order = PurchaseOrder(
+        **_source_fields(PURCHASE_ORDER_ID, "erp-po-001"),
+        ship_id=SHIP_ID,
+        material_id=MATERIAL_ID,
+        equipment_id=EQUIPMENT_ID,
+        supplier_id=SUPPLIER_ID,
+        po_number="PO-001",
+        quantity=PositiveQuantity(Decimal("4.5")),
+        required_date=date(2026, 8, 1),
+        promised_date=date(2026, 8, 15),
+        actual_date=date(2026, 8, 20),
+        status="DELIVERED_LATE",
+        criticality="HIGH",
+    )
+    project_task = ProjectTask(
+        **_source_fields(PROJECT_TASK_ID, "mes-task-001"),
+        ship_id=SHIP_ID,
+        task_code="TASK-001",
+        name="Synthetic installation task",
+        planned_start=date(2026, 8, 1),
+        planned_end=date(2026, 8, 31),
+        actual_start=date(2026, 8, 2),
+        actual_end=date(2026, 9, 2),
+        planned_progress=Progress(Decimal("1")),
+        actual_progress=Progress(Decimal("0.75")),
+        critical_path=True,
+    )
+
+    assert bom_item.material_id == MATERIAL_ID
+    assert purchase_order.actual_date is not None
+    assert purchase_order.required_date is not None
+    assert purchase_order.actual_date > purchase_order.required_date
+    assert project_task.actual_progress == Progress(Decimal("0.75"))
+    assert all(
+        entity.source_updated_at is SOURCE_UPDATED_AT
+        for entity in (bom_item, purchase_order, project_task)
+    )
+
+
+def test_bom_item_requires_drawing_or_equipment_target() -> None:
+    from packages.domain.entities import BOMItem
+    from packages.domain.value_objects import (
+        DomainValidationError,
+        PositiveQuantity,
+    )
+
+    with pytest.raises(
+        DomainValidationError,
+        match="^BOMItem requires drawing_id or equipment_id$",
+    ):
+        BOMItem(
+            **_source_fields(BOM_ITEM_ID, "plm-bom-001"),
+            material_id=MATERIAL_ID,
+            quantity=PositiveQuantity(Decimal("1")),
+        )
+
+
+def test_purchase_order_requires_material_or_equipment_target() -> None:
+    from packages.domain.entities import PurchaseOrder
+    from packages.domain.value_objects import DomainValidationError
+
+    with pytest.raises(
+        DomainValidationError,
+        match="^PurchaseOrder requires material_id or equipment_id$",
+    ):
+        PurchaseOrder(
+            **_source_fields(PURCHASE_ORDER_ID, "erp-po-001"),
+            ship_id=SHIP_ID,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-001",
+            status="OPEN",
+        )
+
+
+@pytest.mark.parametrize(
+    ("planned_start", "planned_end", "actual_start", "actual_end", "field"),
+    [
+        (date(2026, 8, 2), date(2026, 8, 1), None, None, "planned"),
+        (None, None, date(2026, 8, 2), date(2026, 8, 1), "actual"),
+    ],
+)
+def test_project_task_rejects_reverse_date_ranges(
+    planned_start: date | None,
+    planned_end: date | None,
+    actual_start: date | None,
+    actual_end: date | None,
+    field: str,
+) -> None:
+    from packages.domain.entities import ProjectTask
+    from packages.domain.value_objects import DomainValidationError
+
+    with pytest.raises(
+        DomainValidationError,
+        match=rf"^{field}_start cannot be after {field}_end$",
+    ):
+        ProjectTask(
+            **_source_fields(PROJECT_TASK_ID, "mes-task-001"),
+            ship_id=SHIP_ID,
+            task_code="TASK-001",
+            name="Synthetic task",
+            planned_start=planned_start,
+            planned_end=planned_end,
+            actual_start=actual_start,
+            actual_end=actual_end,
+        )
+
+
+def test_operational_entities_require_domain_value_objects_and_strict_bool() -> None:
+    from packages.domain.entities import BOMItem, ProjectTask, PurchaseOrder
+    from packages.domain.value_objects import DomainValidationError
+
+    with pytest.raises(
+        DomainValidationError,
+        match="^quantity must be a PositiveQuantity$",
+    ):
+        BOMItem(
+            **_source_fields(BOM_ITEM_ID, "plm-bom-001"),
+            drawing_id=DRAWING_ID,
+            material_id=MATERIAL_ID,
+            quantity=cast(Any, Decimal("1")),
+        )
+    with pytest.raises(
+        DomainValidationError,
+        match="^quantity must be a PositiveQuantity when provided$",
+    ):
+        PurchaseOrder(
+            **_source_fields(PURCHASE_ORDER_ID, "erp-po-001"),
+            ship_id=SHIP_ID,
+            material_id=MATERIAL_ID,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-001",
+            status="OPEN",
+            quantity=cast(Any, Decimal("1")),
+        )
+    with pytest.raises(
+        DomainValidationError,
+        match="^critical_path must be a bool when provided$",
+    ):
+        ProjectTask(
+            **_source_fields(PROJECT_TASK_ID, "mes-task-001"),
+            ship_id=SHIP_ID,
+            task_code="TASK-001",
+            name="Synthetic task",
+            critical_path=cast(Any, 1),
+        )
+
+
+def test_operational_text_and_progress_fields_reject_unvalidated_values() -> None:
+    from packages.domain.entities import ProjectTask, PurchaseOrder
+    from packages.domain.value_objects import DomainValidationError
+
+    with pytest.raises(DomainValidationError, match="^status must be non-blank$"):
+        PurchaseOrder(
+            **_source_fields(PURCHASE_ORDER_ID, "erp-po-001"),
+            ship_id=SHIP_ID,
+            material_id=MATERIAL_ID,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-001",
+            status=" ",
+        )
+    with pytest.raises(
+        DomainValidationError,
+        match="^planned_progress must be a Progress when provided$",
+    ):
+        ProjectTask(
+            **_source_fields(PROJECT_TASK_ID, "mes-task-001"),
+            ship_id=SHIP_ID,
+            task_code="TASK-001",
+            name="Synthetic task",
+            planned_progress=cast(Any, Decimal("0.5")),
         )
