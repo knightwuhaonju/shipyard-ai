@@ -23,6 +23,7 @@ services:
     environment:
       DATABASE_URL: >-
         ${DATABASE_URL:-postgresql+psycopg://shipyard:shipyard_dev@postgres:5432/shipyard_ai}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
