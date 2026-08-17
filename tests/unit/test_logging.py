@@ -1,0 +1,111 @@
+import json
+import logging
+from collections.abc import Generator
+
+import pytest
+
+
+@pytest.fixture
+def restore_shipyard_logger() -> Generator[None]:
+    logger = logging.getLogger("shipyard_ai")
+    handlers = list(logger.handlers)
+    level = logger.level
+    propagate = logger.propagate
+    yield
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
+
+
+def test_redact_removes_nested_sensitive_values() -> None:
+    from packages.common.logging import REDACTED, redact
+
+    assert redact(
+        {
+            "DATABASE_URL": "db-secret",
+            "nested": [
+                {"api-key": "api-secret"},
+                {"Authorization": "Bearer token", "safe": "kept"},
+            ],
+        }
+    ) == {
+        "DATABASE_URL": REDACTED,
+        "nested": [
+            {"api-key": REDACTED},
+            {"Authorization": REDACTED, "safe": "kept"},
+        ],
+    }
+
+
+def test_json_formatter_redacts_structured_fields() -> None:
+    from packages.common.logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request", logging.INFO, __file__, 1, "request_completed", (), None
+    )
+    record.request_id = "request-123"
+    record.context = {"password": "never-print", "ship_id": "ship-1"}
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert payload["message"] == "request_completed"
+    assert payload["request_id"] == "request-123"
+    assert payload["context"] == {
+        "password": "[REDACTED]",
+        "ship_id": "ship-1",
+    }
+    assert "never-print" not in json.dumps(payload)
+
+
+def test_configure_logging_adds_only_one_json_handler(
+    restore_shipyard_logger: None,
+) -> None:
+    from packages.common.logging import JsonFormatter, configure_logging
+
+    logger = configure_logging("INFO")
+    configure_logging("DEBUG")
+    handlers = [
+        handler
+        for handler in logger.handlers
+        if isinstance(handler.formatter, JsonFormatter)
+    ]
+    assert len(handlers) == 1
+    assert logger.level == logging.DEBUG
+
+
+def test_json_formatter_omits_unsafe_fields_and_exception_messages() -> None:
+    from packages.common.logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request", logging.INFO, __file__, 1, "request_completed", (), None
+    )
+    record.headers = {"Authorization": "Bearer never-print"}
+    record.query = "ship_name=never-print"
+    record.body = {"ship_id": "never-print"}
+    record.customer_record = {"name": "never-print"}
+    record.failure = RuntimeError("never-print")
+
+    rendered = JsonFormatter().format(record)
+
+    assert "never-print" not in rendered
+    assert "headers" not in rendered
+    assert "query" not in rendered
+    assert "body" not in rendered
+    assert "customer_record" not in rendered
+
+
+def test_json_formatter_does_not_interpolate_exception_arguments() -> None:
+    from packages.common.logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "shipyard_ai.request",
+        logging.ERROR,
+        __file__,
+        1,
+        "request_failed: %s",
+        (RuntimeError("never-print"),),
+        None,
+    )
+
+    rendered = JsonFormatter().format(record)
+
+    assert "never-print" not in rendered
