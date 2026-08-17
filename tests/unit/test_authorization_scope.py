@@ -140,3 +140,54 @@ def test_requested_scope_cannot_expand_authenticated_permissions() -> None:
         allowed_project_ids={"project-001"},
         security_level=SecurityLevel.INTERNAL,
     )
+
+
+def test_local_adapter_resolves_only_server_registered_identity() -> None:
+    from adapters.auth.local import LocalAuthenticationAdapter
+    from packages.contracts.auth import SecurityLevel, UserContext
+
+    registered = UserContext(
+        user_id="user-001",
+        roles={"engineering"},
+        departments={"design"},
+        allowed_ship_ids={"ship-001"},
+        allowed_project_ids={"project-001"},
+        security_clearance=SecurityLevel.INTERNAL,
+    )
+    identities = {"dev-credential": registered}
+    adapter = LocalAuthenticationAdapter(identities)
+    identities["dev-credential"] = UserContext(user_id="attacker")
+
+    assert adapter.authenticate("dev-credential") is registered
+
+
+def test_local_adapter_rejects_model_style_identity_payload() -> None:
+    from adapters.auth.local import AuthenticationError, LocalAuthenticationAdapter
+    from packages.contracts.auth import UserContext
+
+    adapter = LocalAuthenticationAdapter(
+        {"dev-credential": UserContext(user_id="server-user")}
+    )
+    model_arguments = {
+        "credential": "dev-credential",
+        "user_id": "attacker",
+        "roles": ["admin"],
+    }
+
+    with pytest.raises(AuthenticationError, match="^Authentication failed$"):
+        adapter.authenticate(cast(Any, model_arguments))
+
+
+@pytest.mark.parametrize("credential", [None, "", "unknown-sensitive-value"])
+def test_local_adapter_fails_without_disclosing_credentials(
+    credential: str | None,
+) -> None:
+    from adapters.auth.local import AuthenticationError, LocalAuthenticationAdapter
+
+    adapter = LocalAuthenticationAdapter({})
+
+    with pytest.raises(AuthenticationError) as captured:
+        adapter.authenticate(credential)
+
+    assert str(captured.value) == "Authentication failed"
+    assert "unknown-sensitive-value" not in str(captured.value)
