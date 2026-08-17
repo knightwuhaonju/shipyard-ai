@@ -568,7 +568,22 @@ def test_entities_are_immutable() -> None:
 
 
 def _assert_domain_imports_allowed(domain_root: Path) -> None:
-    allowed_roots = set(sys.stdlib_module_names) | {"__future__", "packages"}
+    def resolve_relative_import(module_path: Path, node: ast.ImportFrom) -> str:
+        module_package = (
+            "packages",
+            "domain",
+            *module_path.parent.relative_to(domain_root).parts,
+        )
+        parent_depth = max(len(module_package) - node.level + 1, 0)
+        parent_package = module_package[:parent_depth]
+        return ".".join((*parent_package, *(node.module or "").split(".")))
+
+    def is_allowed_import(module_name: str) -> bool:
+        return (
+            module_name.split(".", 1)[0] in sys.stdlib_module_names
+            or module_name == "packages.domain"
+            or module_name.startswith("packages.domain.")
+        )
 
     for module_path in domain_root.rglob("*.py"):
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
@@ -587,18 +602,22 @@ def _assert_domain_imports_allowed(domain_root: Path) -> None:
             for alias in node.names
             if alias.name == "import_module"
         }
-        imported_roots = {
-            alias.name.split(".", 1)[0]
+        imported_modules = {
+            alias.name
             for node in ast.walk(tree)
             if isinstance(node, ast.Import)
             for alias in node.names
         } | {
-            (node.module or "").split(".", 1)[0]
+            (
+                resolve_relative_import(module_path, node)
+                if node.level
+                else node.module or ""
+            )
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom)
         }
-        imported_roots |= {
-            node.args[0].value.split(".", 1)[0]
+        imported_modules |= {
+            node.args[0].value
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and node.args
@@ -614,9 +633,14 @@ def _assert_domain_imports_allowed(domain_root: Path) -> None:
             )
         }
 
-        assert imported_roots <= allowed_roots, (
-            f"{module_path.name} imports non-domain dependency roots: "
-            f"{sorted(imported_roots - allowed_roots)}"
+        disallowed_modules = sorted(
+            module_name
+            for module_name in imported_modules
+            if not is_allowed_import(module_name)
+        )
+        assert not disallowed_modules, (
+            f"{module_path.name} imports non-domain dependencies: "
+            f"{disallowed_modules}"
         )
 
 
@@ -633,6 +657,64 @@ def test_domain_import_guard_rejects_nested_third_party_import(tmp_path: Path) -
 
     with pytest.raises(AssertionError, match="module.py.*fastapi"):
         _assert_domain_imports_allowed(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("source", "forbidden_module"),
+    [
+        (
+            "from packages.contracts.auth import UserContext\n",
+            "packages.contracts.auth",
+        ),
+        (
+            "from packages.common.config import Settings\n",
+            "packages.common.config",
+        ),
+        (
+            'import importlib\nimportlib.import_module("packages.contracts.auth")\n',
+            "packages.contracts.auth",
+        ),
+        (
+            'import importlib\nimportlib.import_module("packages.common.config")\n',
+            "packages.common.config",
+        ),
+    ],
+)
+def test_domain_import_guard_rejects_non_domain_packages_imports(
+    tmp_path: Path,
+    source: str,
+    forbidden_module: str,
+) -> None:
+    module_path = tmp_path / "module.py"
+    module_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=rf"module.py.*{forbidden_module}"):
+        _assert_domain_imports_allowed(tmp_path)
+
+
+def test_domain_import_guard_rejects_relative_import_outside_domain(
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "module.py"
+    module_path.write_text(
+        "from ..contracts.auth import UserContext\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="module.py.*packages.contracts.auth"):
+        _assert_domain_imports_allowed(tmp_path)
+
+
+def test_domain_import_guard_allows_relative_import_within_domain(
+    tmp_path: Path,
+) -> None:
+    module_path = tmp_path / "module.py"
+    module_path.write_text(
+        "from .value_objects import PositiveQuantity\n",
+        encoding="utf-8",
+    )
+
+    _assert_domain_imports_allowed(tmp_path)
 
 
 def test_domain_import_guard_rejects_dynamic_third_party_import(
