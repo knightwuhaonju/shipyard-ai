@@ -4,7 +4,7 @@ import json
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, date
 from decimal import Decimal
 from pathlib import Path
@@ -12,10 +12,32 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from sqlalchemy import literal, select
+from sqlalchemy.orm import Session
 
+from infra.postgres.alias_repository import AliasPersistenceError, AliasRepository
+from infra.postgres.repositories import DomainPersistenceError, DomainRepository
 from packages.contracts.auth import SecurityLevel
-from packages.domain import PositiveQuantity, Progress
-from tests.fixtures import FixtureValidationError, load_shipyard_fixture_set
+from packages.domain import (
+    AliasEntityType,
+    BOMItem,
+    Drawing,
+    EntityAlias,
+    Equipment,
+    Material,
+    PositiveQuantity,
+    Progress,
+    ProjectTask,
+    PurchaseOrder,
+    Ship,
+    ShipSystem,
+    Supplier,
+)
+from tests.fixtures import (
+    FixtureValidationError,
+    load_shipyard_fixture_set,
+    persist_shipyard_fixture_set,
+)
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "shipyard"
 ENTITY_FILES = {
@@ -31,6 +53,7 @@ ENTITY_FILES = {
     "aliases.json": 5,
     "security_scopes.json": 2,
 }
+ALPHA_SHIP_ID = UUID("80000000-0000-0000-0000-000000000001")
 
 
 def _json(name: str) -> Any:
@@ -323,3 +346,71 @@ def test_loader_rejects_invalid_utf8_without_leaking_root(tmp_path: Path) -> Non
         load_shipyard_fixture_set(root)
 
     assert str(captured.value) == "ships.json: invalid encoding"
+
+
+def test_persisted_fixture_graph_round_trips_through_public_repositories(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    persist_shipyard_fixture_set(migrated_session, fixtures)
+    repository = DomainRepository(migrated_session)
+    for ship in fixtures.ships:
+        assert repository.get(Ship, ship.id) == ship
+    for system in fixtures.ship_systems:
+        assert repository.get(ShipSystem, system.id) == system
+    for drawing in fixtures.drawings:
+        assert repository.get(Drawing, drawing.id) == drawing
+    for equipment in fixtures.equipment:
+        assert repository.get(Equipment, equipment.id) == equipment
+    for material in fixtures.materials:
+        assert repository.get(Material, material.id) == material
+    for supplier in fixtures.suppliers:
+        assert repository.get(Supplier, supplier.id) == supplier
+    for bom_item in fixtures.bom_items:
+        assert repository.get(BOMItem, bom_item.id) == bom_item
+    for purchase_order in fixtures.purchase_orders:
+        assert repository.get(PurchaseOrder, purchase_order.id) == purchase_order
+    for project_task in fixtures.project_tasks:
+        assert repository.get(ProjectTask, project_task.id) == project_task
+    aliases = AliasRepository(migrated_session)
+    for alias in fixtures.aliases:
+        assert aliases.resolve(alias.entity_type, alias.alias) == alias
+
+
+def test_persistence_leaves_commit_and_rollback_to_caller(
+    migrated_session: Session,
+) -> None:
+    persist_shipyard_fixture_set(migrated_session, load_shipyard_fixture_set())
+    assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is not None
+    migrated_session.rollback()
+    assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is None
+
+
+def test_duplicate_persistence_fails_without_overwriting_first_dataset(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    persist_shipyard_fixture_set(migrated_session, fixtures)
+    with pytest.raises(DomainPersistenceError):
+        persist_shipyard_fixture_set(migrated_session, fixtures)
+    assert (
+        DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID)
+        == fixtures.ships[0]
+    )
+
+
+def test_alias_failure_rolls_back_whole_dataset_and_session_remains_usable(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    collision = EntityAlias(
+        id=UUID("80000000-0000-0000-0000-000000000096"),
+        entity_type=AliasEntityType.EQUIPMENT,
+        entity_id=fixtures.equipment[0].id,
+        alias="  SYNTHETIC   ALPHA MAIN COOLING PUMP  ",
+    )
+    invalid = replace(fixtures, aliases=(*fixtures.aliases, collision))
+    with pytest.raises(AliasPersistenceError):
+        persist_shipyard_fixture_set(migrated_session, invalid)
+    assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is None
+    assert migrated_session.scalar(select(literal(1))) == 1

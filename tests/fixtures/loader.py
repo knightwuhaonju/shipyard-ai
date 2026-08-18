@@ -15,6 +15,8 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from infra.postgres.alias_repository import AliasRepository
+from infra.postgres.repositories import DomainRepository
 from packages.contracts.auth import SecurityLevel, UserContext
 from packages.domain import (
     AliasEntityType,
@@ -872,4 +874,22 @@ def persist_shipyard_fixture_set(
     session: Session,
     fixture_set: ShipyardFixtureSet,
 ) -> None:
-    raise NotImplementedError("fixture persistence is not implemented")
+    _validate_fixture_set(fixture_set, _EXPECTED_SECURITY_SCOPE_SHIPS)
+    with session.begin_nested():
+        domain_repository = DomainRepository(session)
+        for records in (
+            fixture_set.ships,
+            fixture_set.ship_systems,
+            fixture_set.drawings,
+            fixture_set.equipment,
+            fixture_set.materials,
+            fixture_set.suppliers,
+            fixture_set.bom_items,
+            fixture_set.purchase_orders,
+            fixture_set.project_tasks,
+        ):
+            for record in records:
+                domain_repository.insert(record)
+        alias_repository = AliasRepository(session)
+        for alias in fixture_set.aliases:
+            alias_repository.insert(alias)
