@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, TypedDict, cast
 from uuid import UUID
 
@@ -19,7 +16,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.engine import URL, Engine, make_url
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -36,6 +33,13 @@ from packages.domain import (
     ShipSystem,
     Supplier,
 )
+from tests.integration.postgres_support import (
+    alembic_config,
+    configured_test_database_url,
+    downgrade_to_base,
+    validated_alembic_test_database_url,
+    validated_test_database_url,
+)
 
 DOMAIN_TABLES = {
     "bom_items",
@@ -48,9 +52,6 @@ DOMAIN_TABLES = {
     "ships",
     "suppliers",
 }
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EXPLICIT_DATABASE_URL_ATTRIBUTE = "shipyard_ai_explicit_database_url"
 
 
 class _SourceFields(TypedDict):
@@ -183,72 +184,12 @@ def _synthetic_domain_graph() -> tuple[
     )
 
 
-def _validated_test_database_url(raw_url: str) -> URL:
-    url = make_url(raw_url)
-    if url.database is None or not url.database.endswith("_test"):
-        raise ValueError("TEST_DATABASE_URL must name a database ending in _test")
-    return url
-
-
-def _configured_test_database_url() -> URL:
-    raw_url = os.getenv("TEST_DATABASE_URL")
-    if raw_url is None:
-        pytest.skip("TEST_DATABASE_URL is not configured")
-    try:
-        return _validated_test_database_url(raw_url)
-    except ValueError as exc:
-        pytest.fail(str(exc), pytrace=False)
-
-
-def _alembic_config(url: URL) -> Config:
-    config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
-    rendered_url = url.render_as_string(hide_password=False).replace("%", "%%")
-    config.set_main_option("sqlalchemy.url", rendered_url)
-    config.attributes[EXPLICIT_DATABASE_URL_ATTRIBUTE] = True
-    return config
-
-
-def _validated_alembic_test_database_url(config: Config) -> URL:
-    raw_url = config.get_main_option("sqlalchemy.url")
-    if raw_url is None:
-        raise ValueError("Alembic must have an explicitly configured test database")
-    url = _validated_test_database_url(raw_url)
-    if url.database != "shipyard_ai_test":
-        raise ValueError("Alembic must target database shipyard_ai_test")
-    return url
-
-
-def _downgrade_to_base(config: Config) -> None:
-    _validated_alembic_test_database_url(config)
-    command.downgrade(config, "base")
-
-
-@pytest.fixture()
-def migrated_engine() -> Iterator[Engine]:
-    url = _configured_test_database_url()
-    config = _alembic_config(url)
-    _downgrade_to_base(config)
-    command.upgrade(config, "head")
-    engine = create_engine(url)
-    try:
-        yield engine
-    finally:
-        engine.dispose()
-        _downgrade_to_base(config)
-
-
-@pytest.fixture()
-def migrated_session(migrated_engine: Engine) -> Iterator[Session]:
-    with Session(migrated_engine) as session:
-        yield session
-
-
 def test_test_database_url_rejects_non_test_database_without_leaking_secret() -> None:
     secret = "do-not-print"
     raw_url = f"postgresql+psycopg://shipyard:{secret}@localhost/shipyard_ai"
 
     with pytest.raises(ValueError) as captured:
-        _validated_test_database_url(raw_url)
+        validated_test_database_url(raw_url)
 
     assert str(captured.value) == (
         "TEST_DATABASE_URL must name a database ending in _test"
@@ -259,8 +200,8 @@ def test_test_database_url_rejects_non_test_database_without_leaking_secret() ->
 def test_explicit_alembic_test_url_takes_precedence_over_database_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    url = _configured_test_database_url()
-    config = _alembic_config(url)
+    url = configured_test_database_url()
+    config = alembic_config(url)
     monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql+missingdriver://invalid:invalid@127.0.0.1/shipyard_ai",
@@ -268,13 +209,13 @@ def test_explicit_alembic_test_url_takes_precedence_over_database_url(
 
     command.current(config)
 
-    assert _validated_alembic_test_database_url(config) == url
+    assert validated_alembic_test_database_url(config) == url
 
 
 def test_alembic_downgrade_rejects_other_test_database_before_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = _alembic_config(
+    config = alembic_config(
         make_url("postgresql+psycopg://shipyard:do-not-print@localhost/other_test")
     )
     downgrade_calls: list[tuple[Config, str]] = []
@@ -285,7 +226,7 @@ def test_alembic_downgrade_rejects_other_test_database_before_invocation(
     monkeypatch.setattr(command, "downgrade", record_downgrade)
 
     with pytest.raises(ValueError) as captured:
-        _downgrade_to_base(config)
+        downgrade_to_base(config)
 
     assert str(captured.value) == "Alembic must target database shipyard_ai_test"
     assert "do-not-print" not in str(captured.value)
@@ -293,11 +234,11 @@ def test_alembic_downgrade_rejects_other_test_database_before_invocation(
 
 
 def test_migration_upgrades_an_empty_postgresql_database() -> None:
-    url = _configured_test_database_url()
-    config = _alembic_config(url)
+    url = configured_test_database_url()
+    config = alembic_config(url)
     engine = create_engine(url)
     try:
-        _downgrade_to_base(config)
+        downgrade_to_base(config)
         assert DOMAIN_TABLES.isdisjoint(inspect(engine).get_table_names())
 
         command.upgrade(config, "head")
@@ -309,18 +250,19 @@ def test_migration_upgrades_an_empty_postgresql_database() -> None:
                 connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                == "20260817_0001"
+                == "20260818_0002"
             )
     finally:
         engine.dispose()
-        _downgrade_to_base(config)
+        downgrade_to_base(config)
 
 
 def test_domain_metadata_declares_all_entity_tables_and_source_fields() -> None:
     from infra.postgres.models import Base
 
-    assert set(Base.metadata.tables) == DOMAIN_TABLES
-    for table in Base.metadata.tables.values():
+    assert DOMAIN_TABLES <= set(Base.metadata.tables)
+    for table_name in DOMAIN_TABLES:
+        table = Base.metadata.tables[table_name]
         assert {"id", "source_system", "source_id", "source_updated_at"} <= {
             column.name for column in table.columns
         }

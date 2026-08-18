@@ -10,9 +10,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -238,6 +240,68 @@ class SupplierModel(_SourcedModel, Base):
 
     supplier_code: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class EntityAliasModel(Base):
+    __tablename__ = "entity_aliases"
+    __table_args__ = (
+        CheckConstraint("btrim(alias) <> ''", name="ck_entity_aliases_alias"),
+        CheckConstraint(
+            "btrim(normalized_alias) <> ''",
+            name="ck_entity_aliases_normalized_alias",
+        ),
+        CheckConstraint(
+            "source_system IS NULL OR btrim(source_system) <> ''",
+            name="ck_entity_aliases_source_system",
+        ),
+        CheckConstraint(
+            "(entity_type = 'supplier' AND supplier_id IS NOT NULL "
+            "AND equipment_id IS NULL AND material_id IS NULL) OR "
+            "(entity_type = 'equipment' AND supplier_id IS NULL "
+            "AND equipment_id IS NOT NULL AND material_id IS NULL) OR "
+            "(entity_type = 'material' AND supplier_id IS NULL "
+            "AND equipment_id IS NULL AND material_id IS NOT NULL)",
+            name="ck_entity_aliases_target",
+        ),
+        Index(
+            "uq_entity_aliases_global_lookup",
+            "entity_type",
+            "normalized_alias",
+            unique=True,
+            postgresql_where=text("source_system IS NULL"),
+        ),
+        Index(
+            "uq_entity_aliases_source_lookup",
+            "entity_type",
+            "source_system",
+            "normalized_alias",
+            unique=True,
+            postgresql_where=text("source_system IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(Text, nullable=False)
+    source_system: Mapped[str | None] = mapped_column(Text)
+    supplier_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("suppliers.id", name="fk_entity_aliases_supplier_id"),
+        index=True,
+    )
+    equipment_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("equipment.id", name="fk_entity_aliases_equipment_id"),
+        index=True,
+    )
+    material_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("materials.id", name="fk_entity_aliases_material_id"),
+        index=True,
+    )
 
 
 class PurchaseOrderModel(_SourcedModel, Base):
