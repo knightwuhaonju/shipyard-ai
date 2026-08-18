@@ -301,6 +301,8 @@ Create:
 - `services/entity_resolution/__init__.py`
 - `services/entity_resolution/service.py`
 - `tests/unit/test_entity_aliases.py`
+- `tests/integration/conftest.py`
+- `tests/integration/postgres_support.py`
 - `tests/integration/test_entity_alias_repository.py`
 - `tests/security/test_entity_alias_scope.py`
 
@@ -312,6 +314,7 @@ Modify:
 - `tests/integration/test_domain_repository.py`
 - `tests/integration/test_deployment.py` if installed public imports expand
 - `infra/postgres/README.md`
+- `docs/02-domain-model.md`
 
 No Task 008 file or synthetic-fixture package is created.
 
