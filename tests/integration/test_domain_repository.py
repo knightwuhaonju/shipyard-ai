@@ -29,6 +29,7 @@ DOMAIN_TABLES = {
 }
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+EXPLICIT_DATABASE_URL_ATTRIBUTE = "shipyard_ai_explicit_database_url"
 
 
 def _validated_test_database_url(raw_url: str) -> URL:
@@ -52,7 +53,18 @@ def _alembic_config(url: URL) -> Config:
     config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
     rendered_url = url.render_as_string(hide_password=False).replace("%", "%%")
     config.set_main_option("sqlalchemy.url", rendered_url)
+    config.attributes[EXPLICIT_DATABASE_URL_ATTRIBUTE] = True
     return config
+
+
+def _validated_alembic_test_database_url(config: Config) -> URL:
+    raw_url = config.get_main_option("sqlalchemy.url")
+    if raw_url is None:
+        raise ValueError("Alembic must have an explicitly configured test database")
+    url = _validated_test_database_url(raw_url)
+    if url.database != "shipyard_ai_test":
+        raise ValueError("Alembic must target database shipyard_ai_test")
+    return url
 
 
 def test_test_database_url_rejects_non_test_database_without_leaking_secret() -> None:
@@ -68,12 +80,27 @@ def test_test_database_url_rejects_non_test_database_without_leaking_secret() ->
     assert secret not in str(captured.value)
 
 
+def test_explicit_alembic_test_url_takes_precedence_over_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = _configured_test_database_url()
+    config = _alembic_config(url)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+missingdriver://invalid:invalid@127.0.0.1/shipyard_ai",
+    )
+
+    command.current(config)
+
+    assert _validated_alembic_test_database_url(config) == url
+
+
 def test_migration_upgrades_an_empty_postgresql_database() -> None:
     url = _configured_test_database_url()
     config = _alembic_config(url)
     engine = create_engine(url)
     try:
-        assert url.database == "shipyard_ai_test"
+        _validated_alembic_test_database_url(config)
         command.downgrade(config, "base")
         assert DOMAIN_TABLES.isdisjoint(inspect(engine).get_table_names())
 
@@ -90,7 +117,7 @@ def test_migration_upgrades_an_empty_postgresql_database() -> None:
             )
     finally:
         engine.dispose()
-        assert url.database == "shipyard_ai_test"
+        _validated_alembic_test_database_url(config)
         command.downgrade(config, "base")
 
 
