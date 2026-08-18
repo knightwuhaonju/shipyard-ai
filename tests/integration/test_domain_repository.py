@@ -218,18 +218,23 @@ def _validated_alembic_test_database_url(config: Config) -> URL:
     return url
 
 
+def _downgrade_to_base(config: Config) -> None:
+    _validated_alembic_test_database_url(config)
+    command.downgrade(config, "base")
+
+
 @pytest.fixture()
 def migrated_engine() -> Iterator[Engine]:
     url = _configured_test_database_url()
     config = _alembic_config(url)
-    command.downgrade(config, "base")
+    _downgrade_to_base(config)
     command.upgrade(config, "head")
     engine = create_engine(url)
     try:
         yield engine
     finally:
         engine.dispose()
-        command.downgrade(config, "base")
+        _downgrade_to_base(config)
 
 
 @pytest.fixture()
@@ -266,13 +271,33 @@ def test_explicit_alembic_test_url_takes_precedence_over_database_url(
     assert _validated_alembic_test_database_url(config) == url
 
 
+def test_alembic_downgrade_rejects_other_test_database_before_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _alembic_config(
+        make_url("postgresql+psycopg://shipyard:do-not-print@localhost/other_test")
+    )
+    downgrade_calls: list[tuple[Config, str]] = []
+
+    def record_downgrade(config: Config, revision: str) -> None:
+        downgrade_calls.append((config, revision))
+
+    monkeypatch.setattr(command, "downgrade", record_downgrade)
+
+    with pytest.raises(ValueError) as captured:
+        _downgrade_to_base(config)
+
+    assert str(captured.value) == "Alembic must target database shipyard_ai_test"
+    assert "do-not-print" not in str(captured.value)
+    assert downgrade_calls == []
+
+
 def test_migration_upgrades_an_empty_postgresql_database() -> None:
     url = _configured_test_database_url()
     config = _alembic_config(url)
     engine = create_engine(url)
     try:
-        _validated_alembic_test_database_url(config)
-        command.downgrade(config, "base")
+        _downgrade_to_base(config)
         assert DOMAIN_TABLES.isdisjoint(inspect(engine).get_table_names())
 
         command.upgrade(config, "head")
@@ -288,8 +313,7 @@ def test_migration_upgrades_an_empty_postgresql_database() -> None:
             )
     finally:
         engine.dispose()
-        _validated_alembic_test_database_url(config)
-        command.downgrade(config, "base")
+        _downgrade_to_base(config)
 
 
 def test_domain_metadata_declares_all_entity_tables_and_source_fields() -> None:
