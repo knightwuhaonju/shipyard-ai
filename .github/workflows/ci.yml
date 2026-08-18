@@ -14,7 +14,27 @@ concurrency:
 jobs:
   quality:
     runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: shipyard_ai_test
+          POSTGRES_PASSWORD: shipyard_test
+          POSTGRES_USER: shipyard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shipyard_test -d shipyard_ai_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     timeout-minutes: 10
+
+    env:
+      TEST_DATABASE_URL: >-
+        postgresql+psycopg://shipyard_test:shipyard_test@127.0.0.1:5432/shipyard_ai_test
 
     steps:
       - name: Check out repository

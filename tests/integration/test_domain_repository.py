@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from sqlalchemy import CheckConstraint, DateTime, UniqueConstraint
+import os
+from pathlib import Path
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    UniqueConstraint,
+    create_engine,
+    inspect,
+    text,
+)
+from sqlalchemy.engine import URL, make_url
 
 DOMAIN_TABLES = {
     "bom_items",
@@ -13,6 +27,71 @@ DOMAIN_TABLES = {
     "ships",
     "suppliers",
 }
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _validated_test_database_url(raw_url: str) -> URL:
+    url = make_url(raw_url)
+    if url.database is None or not url.database.endswith("_test"):
+        raise ValueError("TEST_DATABASE_URL must name a database ending in _test")
+    return url
+
+
+def _configured_test_database_url() -> URL:
+    raw_url = os.getenv("TEST_DATABASE_URL")
+    if raw_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    try:
+        return _validated_test_database_url(raw_url)
+    except ValueError as exc:
+        pytest.fail(str(exc), pytrace=False)
+
+
+def _alembic_config(url: URL) -> Config:
+    config = Config(str(REPOSITORY_ROOT / "alembic.ini"))
+    rendered_url = url.render_as_string(hide_password=False).replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", rendered_url)
+    return config
+
+
+def test_test_database_url_rejects_non_test_database_without_leaking_secret() -> None:
+    secret = "do-not-print"
+    raw_url = f"postgresql+psycopg://shipyard:{secret}@localhost/shipyard_ai"
+
+    with pytest.raises(ValueError) as captured:
+        _validated_test_database_url(raw_url)
+
+    assert str(captured.value) == (
+        "TEST_DATABASE_URL must name a database ending in _test"
+    )
+    assert secret not in str(captured.value)
+
+
+def test_migration_upgrades_an_empty_postgresql_database() -> None:
+    url = _configured_test_database_url()
+    config = _alembic_config(url)
+    engine = create_engine(url)
+    try:
+        assert url.database == "shipyard_ai_test"
+        command.downgrade(config, "base")
+        assert DOMAIN_TABLES.isdisjoint(inspect(engine).get_table_names())
+
+        command.upgrade(config, "head")
+
+        table_names = set(inspect(engine).get_table_names())
+        assert DOMAIN_TABLES <= table_names
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+                == "20260817_0001"
+            )
+    finally:
+        engine.dispose()
+        assert url.database == "shipyard_ai_test"
+        command.downgrade(config, "base")
 
 
 def test_domain_metadata_declares_all_entity_tables_and_source_fields() -> None:
