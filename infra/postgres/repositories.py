@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import TypedDict, TypeVar, cast
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from infra.postgres.models import (
@@ -58,6 +59,10 @@ EntityT = TypeVar(
 )
 
 
+class DomainPersistenceError(RuntimeError):
+    """Raised when a domain entity violates persistence constraints."""
+
+
 class UnsupportedDomainEntityError(TypeError):
     """Raised for an entity type outside the Task 005 domain set."""
 
@@ -92,6 +97,8 @@ def _source_values(entity: DomainEntity) -> _SourceValues:
 
 
 def _to_model(entity: DomainEntity) -> _SourcedModel:
+    if type(entity) not in _MODEL_BY_ENTITY:
+        raise UnsupportedDomainEntityError("unsupported domain entity type")
     source = _source_values(entity)
     match entity:
         case Ship():
@@ -308,9 +315,14 @@ class DomainRepository:
 
     def insert(self, entity: DomainEntity) -> None:
         model = _to_model(entity)
-        with self._session.begin_nested():
-            self._session.add(model)
-            self._session.flush()
+        try:
+            with self._session.begin_nested():
+                self._session.add(model)
+                self._session.flush()
+        except IntegrityError:
+            raise DomainPersistenceError(
+                "domain entity violates persistence constraints"
+            ) from None
 
     def get(
         self,

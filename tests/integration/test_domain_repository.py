@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 from uuid import UUID
 
 import pytest
@@ -20,6 +20,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import URL, Engine, make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from packages.domain import (
@@ -415,3 +416,226 @@ def test_repository_get_returns_none_for_missing_canonical_id(
     repository = DomainRepository(migrated_session)
 
     assert repository.get(Ship, UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")) is None
+
+
+def test_repository_translates_duplicate_source_identity_without_value_leak(
+    migrated_session: Session,
+) -> None:
+    from infra.postgres.repositories import (
+        DomainPersistenceError,
+        DomainRepository,
+    )
+
+    repository = DomainRepository(migrated_session)
+    first = _synthetic_domain_graph()[0]
+    repository.insert(first)
+    migrated_session.commit()
+
+    sensitive_source_id = first.source_id
+    duplicate = Ship(
+        **_source_fields(
+            UUID("20000000-0000-0000-0000-000000000001"),
+            sensitive_source_id,
+        ),
+        ship_code="SHIP-002",
+    )
+
+    with pytest.raises(DomainPersistenceError) as captured:
+        repository.insert(duplicate)
+
+    assert str(captured.value) == "domain entity violates persistence constraints"
+    assert sensitive_source_id not in str(captured.value)
+    assert repository.get(Ship, first.id) == first
+
+
+def test_repository_translates_foreign_key_failure_and_preserves_session(
+    migrated_session: Session,
+) -> None:
+    from infra.postgres.repositories import (
+        DomainPersistenceError,
+        DomainRepository,
+    )
+
+    repository = DomainRepository(migrated_session)
+    invalid_system = ShipSystem(
+        **_source_fields(
+            UUID("20000000-0000-0000-0000-000000000002"),
+            "missing-ship-system",
+        ),
+        ship_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        system_code="SYS-MISSING",
+        name="Synthetic missing system",
+    )
+
+    with pytest.raises(
+        DomainPersistenceError,
+        match="^domain entity violates persistence constraints$",
+    ):
+        repository.insert(invalid_system)
+
+    valid_ship = _synthetic_domain_graph()[0]
+    repository.insert(valid_ship)
+    assert repository.get(Ship, valid_ship.id) == valid_ship
+
+
+def test_repository_rejects_types_outside_task_005(migrated_session: Session) -> None:
+    from infra.postgres.repositories import (
+        DomainRepository,
+        UnsupportedDomainEntityError,
+    )
+
+    repository = DomainRepository(migrated_session)
+
+    with pytest.raises(
+        UnsupportedDomainEntityError,
+        match="^unsupported domain entity type$",
+    ):
+        repository.insert(cast(Any, object()))
+    with pytest.raises(
+        UnsupportedDomainEntityError,
+        match="^unsupported domain entity type$",
+    ):
+        repository.get(cast(Any, str), SHIP_ID)
+
+
+def _invalid_persistence_model(case: str) -> object:
+    from infra.postgres.models import (
+        BOMItemModel,
+        MaterialModel,
+        ProjectTaskModel,
+        PurchaseOrderModel,
+        ShipModel,
+    )
+
+    entity_id = UUID(
+        {
+            "blank_source": "30000000-0000-0000-0000-000000000001",
+            "blank_text": "30000000-0000-0000-0000-000000000002",
+            "bom_target": "30000000-0000-0000-0000-000000000003",
+            "bom_zero": "30000000-0000-0000-0000-000000000004",
+            "bom_nan": "30000000-0000-0000-0000-000000000005",
+            "po_target": "30000000-0000-0000-0000-000000000006",
+            "po_blank_optional": "30000000-0000-0000-0000-000000000007",
+            "task_dates": "30000000-0000-0000-0000-000000000008",
+            "task_progress": "30000000-0000-0000-0000-000000000009",
+            "task_nan": "30000000-0000-0000-0000-000000000010",
+        }[case]
+    )
+    source = _source_fields(entity_id, f"invalid-{case}")
+    if case == "blank_source":
+        return ShipModel(
+            id=entity_id,
+            source_system=" ",
+            source_id=source["source_id"],
+            source_updated_at=SOURCE_UPDATED_AT,
+            ship_code="SHIP-INVALID-SOURCE",
+        )
+    if case == "blank_text":
+        return MaterialModel(
+            **source,
+            material_code="MAT-INVALID-TEXT",
+            description=" ",
+        )
+    if case == "bom_target":
+        return BOMItemModel(
+            **source,
+            drawing_id=None,
+            equipment_id=None,
+            material_id=MATERIAL_ID,
+            quantity=Decimal("1"),
+        )
+    if case == "bom_zero":
+        return BOMItemModel(
+            **source,
+            drawing_id=DRAWING_ID,
+            equipment_id=None,
+            material_id=MATERIAL_ID,
+            quantity=Decimal("0"),
+        )
+    if case == "bom_nan":
+        return BOMItemModel(
+            **source,
+            drawing_id=DRAWING_ID,
+            equipment_id=None,
+            material_id=MATERIAL_ID,
+            quantity=Decimal("NaN"),
+        )
+    if case == "po_target":
+        return PurchaseOrderModel(
+            **source,
+            ship_id=SHIP_ID,
+            material_id=None,
+            equipment_id=None,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-INVALID-TARGET",
+            status="OPEN",
+        )
+    if case == "po_blank_optional":
+        return PurchaseOrderModel(
+            **source,
+            ship_id=SHIP_ID,
+            material_id=MATERIAL_ID,
+            equipment_id=None,
+            supplier_id=SUPPLIER_ID,
+            po_number="PO-INVALID-TEXT",
+            status="OPEN",
+            criticality=" ",
+        )
+    if case == "task_dates":
+        return ProjectTaskModel(
+            **source,
+            ship_id=SHIP_ID,
+            task_code="TASK-INVALID-DATES",
+            name="Invalid date range",
+            planned_start=date(2027, 2, 1),
+            planned_end=date(2027, 1, 1),
+        )
+    if case == "task_progress":
+        return ProjectTaskModel(
+            **source,
+            ship_id=SHIP_ID,
+            task_code="TASK-INVALID-PROGRESS",
+            name="Invalid progress",
+            planned_progress=Decimal("1.1"),
+        )
+    if case == "task_nan":
+        return ProjectTaskModel(
+            **source,
+            ship_id=SHIP_ID,
+            task_code="TASK-NAN-PROGRESS",
+            name="NaN progress",
+            actual_progress=Decimal("NaN"),
+        )
+    raise AssertionError("unhandled constraint case")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "blank_source",
+        "blank_text",
+        "bom_target",
+        "bom_zero",
+        "bom_nan",
+        "po_target",
+        "po_blank_optional",
+        "task_dates",
+        "task_progress",
+        "task_nan",
+    ],
+)
+def test_postgresql_rejects_domain_constraint_violations(
+    migrated_session: Session,
+    case: str,
+) -> None:
+    from infra.postgres.repositories import DomainRepository
+
+    repository = DomainRepository(migrated_session)
+    for entity in _synthetic_domain_graph()[:6]:
+        repository.insert(entity)
+    migrated_session.commit()
+
+    with pytest.raises(IntegrityError):
+        with migrated_session.begin_nested():
+            migrated_session.add(_invalid_persistence_model(case))
+            migrated_session.flush()
