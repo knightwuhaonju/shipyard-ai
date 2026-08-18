@@ -33,6 +33,7 @@ from packages.domain import (
     ShipSystem,
     Supplier,
 )
+from services.entity_resolution import EntityResolutionService
 from tests.fixtures import (
     FixtureValidationError,
     load_shipyard_fixture_set,
@@ -438,3 +439,67 @@ def test_alias_failure_rolls_back_whole_dataset_and_session_remains_usable(
         persist_shipyard_fixture_set(migrated_session, invalid)
     assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is None
     assert migrated_session.scalar(select(literal(1))) == 1
+
+
+def test_fixture_equipment_aliases_respect_both_ship_security_scopes(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    persist_shipyard_fixture_set(migrated_session, fixtures)
+    domain_repository = DomainRepository(migrated_session)
+    service = EntityResolutionService(
+        AliasRepository(migrated_session),
+        lambda entity_id: domain_repository.get(Equipment, entity_id),
+    )
+    contexts = {item.name: item.user_context for item in fixtures.security_contexts}
+    alpha_alias = "Synthetic Alpha Main Cooling Pump"
+    beta_alias = "Synthetic Beta Main Generator"
+
+    alpha_result = service.resolve(
+        entity_type=AliasEntityType.EQUIPMENT,
+        raw_alias=alpha_alias,
+        user_context=contexts["ship-alpha-only"],
+    )
+    assert alpha_result is not None
+    assert alpha_result.entity_id == UUID("80000000-0000-0000-0000-000000000031")
+    assert service.resolve(
+        entity_type=AliasEntityType.EQUIPMENT,
+        raw_alias=beta_alias,
+        user_context=contexts["ship-alpha-only"],
+    ) is None
+
+    beta_result = service.resolve(
+        entity_type=AliasEntityType.EQUIPMENT,
+        raw_alias=beta_alias,
+        user_context=contexts["ship-beta-only"],
+    )
+    assert beta_result is not None
+    assert beta_result.entity_id == UUID("80000000-0000-0000-0000-000000000032")
+    assert service.resolve(
+        entity_type=AliasEntityType.EQUIPMENT,
+        raw_alias=alpha_alias,
+        user_context=contexts["ship-beta-only"],
+    ) is None
+    assert service.resolve(
+        entity_type=AliasEntityType.EQUIPMENT,
+        raw_alias="Synthetic Alpha Main Cooling Pumps",
+        user_context=contexts["ship-alpha-only"],
+    ) is None
+
+
+def test_fixture_supplier_aliases_are_explicit_and_exact(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    persist_shipyard_fixture_set(migrated_session, fixtures)
+    repository = AliasRepository(migrated_session)
+    expected_id = UUID("80000000-0000-0000-0000-000000000051")
+    for raw_alias in (
+        "Synthetic Northstar Marine Systems",
+        "SNMS",
+        "合成北星船舶系统",
+    ):
+        resolved = repository.resolve(AliasEntityType.SUPPLIER, raw_alias)
+        assert resolved is not None
+        assert resolved.entity_id == expected_id
+    assert repository.resolve(AliasEntityType.SUPPLIER, "Northstar") is None
