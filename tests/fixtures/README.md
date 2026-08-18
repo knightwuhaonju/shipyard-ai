@@ -53,7 +53,7 @@ caller-owned session remains usable.
 
 ## Files
 
-The loader requires exactly these JSON files beneath `tests/fixtures/shipyard`:
+The loader requires these JSON files beneath `tests/fixtures/shipyard`:
 
 ```text
 manifest.json
