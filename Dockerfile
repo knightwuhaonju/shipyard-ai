@@ -10,6 +10,8 @@ COPY apps ./apps
 COPY packages ./packages
 COPY adapters ./adapters
 COPY services ./services
+COPY infra ./infra
+COPY alembic.ini ./
 
 RUN pip install --no-cache-dir .
 

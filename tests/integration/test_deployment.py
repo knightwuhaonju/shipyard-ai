@@ -140,6 +140,19 @@ def _build_package_artifact(build_context: Path, wheel: Path) -> None:
         archive.writestr(f"{dist_info}/RECORD", "")
 
 
+def test_docker_build_inputs_include_postgres_migration_runtime(
+    tmp_path: Path,
+) -> None:
+    build_context = tmp_path / "build-context"
+    build_context.mkdir()
+
+    _stage_docker_copy_inputs(build_context)
+
+    assert build_context.joinpath("infra/postgres/models.py").is_file()
+    assert build_context.joinpath("infra/postgres/repositories.py").is_file()
+    assert build_context.joinpath("alembic.ini").is_file()
+
+
 def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) -> None:
     build_context = tmp_path / "build-context"
     wheel = tmp_path / "shipyard_ai-0.1.0-py3-none-any.whl"
@@ -179,11 +192,13 @@ def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) ->
             "-S",
             "-c",
             "from adapters.auth.local import LocalAuthenticationAdapter; "
+            "from infra.postgres import Base, DomainRepository; "
             "from packages.common.logging import REDACTED; "
             "from packages.contracts.auth import AuthorizationScope; "
             "from services.auth.service import authorization_scope_for; "
             "print(REDACTED, AuthorizationScope.__name__, "
-            "LocalAuthenticationAdapter.__name__, authorization_scope_for.__name__)",
+            "LocalAuthenticationAdapter.__name__, authorization_scope_for.__name__, "
+            "Base.__name__, DomainRepository.__name__)",
         ],
         cwd=isolated_cwd,
         env=environment,
@@ -195,7 +210,7 @@ def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) ->
     assert smoke.returncode == 0, smoke.stdout + smoke.stderr
     assert smoke.stdout.strip() == (
         "[REDACTED] AuthorizationScope LocalAuthenticationAdapter "
-        "authorization_scope_for"
+        "authorization_scope_for Base DomainRepository"
     )
 
 
