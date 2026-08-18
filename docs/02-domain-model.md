@@ -125,9 +125,15 @@ Represents a shipboard system, such as ballast, fire, HVAC, electrical.
 - normalized_alias
 - source_system optional
 
-Example:
-
-Wartsila / Wärtsilä / 瓦锡兰 -> one Supplier.
+Aliases are explicit links; they never replace canonical UUIDs.
+`Wärtsilä`, `Wartsila`, and `瓦锡兰` require three stored aliases to resolve
+to one Supplier. Normalization applies NFKC, case folding, and whitespace
+collapse while preserving accents and punctuation. No fuzzy lookup or
+automatic merge is allowed. A source-specific exact match precedes a global
+fallback; a lookup without a source sees only global aliases. Supplier and
+Material aliases are authenticated global master data. Equipment aliases
+resolve only when the canonical Equipment belongs to the server-derived
+allowed ship scope; missing and unauthorized Equipment both return no result.
 
 ## Relationship principle
 

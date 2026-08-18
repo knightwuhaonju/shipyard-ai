@@ -24,6 +24,20 @@ from packages.common.config import load_settings
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_postgres_operator_docs_cover_entity_alias_safety() -> None:
+    documentation = REPOSITORY_ROOT.joinpath("infra/postgres/README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "20260818_0002" in documentation
+    assert "Wärtsilä" in documentation
+    assert "Wartsila" in documentation
+    assert "瓦锡兰" in documentation
+    assert "No fuzzy" in documentation
+    assert "source-specific" in documentation
+    assert "caller-owned" in documentation
+
+
 def _docker_runtime_command() -> list[str]:
     for line in (
         REPOSITORY_ROOT.joinpath("Dockerfile").read_text(encoding="utf-8").splitlines()
@@ -192,13 +206,16 @@ def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) ->
             "-S",
             "-c",
             "from adapters.auth.local import LocalAuthenticationAdapter; "
-            "from infra.postgres import Base, DomainRepository; "
+            "from infra.postgres import AliasRepository, Base, DomainRepository; "
             "from packages.common.logging import REDACTED; "
             "from packages.contracts.auth import AuthorizationScope; "
+            "from packages.domain import EntityAlias; "
             "from services.auth.service import authorization_scope_for; "
+            "from services.entity_resolution import EntityResolutionService; "
             "print(REDACTED, AuthorizationScope.__name__, "
             "LocalAuthenticationAdapter.__name__, authorization_scope_for.__name__, "
-            "Base.__name__, DomainRepository.__name__)",
+            "Base.__name__, DomainRepository.__name__, AliasRepository.__name__, "
+            "EntityAlias.__name__, EntityResolutionService.__name__)",
         ],
         cwd=isolated_cwd,
         env=environment,
@@ -210,7 +227,8 @@ def test_docker_build_inputs_install_runtime_package_artifact(tmp_path: Path) ->
     assert smoke.returncode == 0, smoke.stdout + smoke.stderr
     assert smoke.stdout.strip() == (
         "[REDACTED] AuthorizationScope LocalAuthenticationAdapter "
-        "authorization_scope_for Base DomainRepository"
+        "authorization_scope_for Base DomainRepository AliasRepository "
+        "EntityAlias EntityResolutionService"
     )
 
 

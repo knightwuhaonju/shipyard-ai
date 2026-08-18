@@ -467,11 +467,14 @@ def test_public_domain_api_exports_all_task_005_types() -> None:
     import packages.domain as domain
 
     expected = {
+        "AliasEntityType",
         "BOMItem",
         "DomainValidationError",
         "Drawing",
         "Equipment",
+        "EntityAlias",
         "Material",
+        "normalize_alias",
         "PositiveQuantity",
         "Progress",
         "ProjectTask",

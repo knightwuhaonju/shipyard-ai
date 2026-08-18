@@ -85,3 +85,28 @@ TEST_DATABASE_URL=postgresql+psycopg://shipyard:shipyard_dev@127.0.0.1:55432/shi
 If `TEST_DATABASE_URL` is absent, this PostgreSQL-specific module skips
 locally. CI always provisions PostgreSQL and supplies the variable, so the
 repository and migration tests are mandatory in the quality gate.
+
+## Entity aliases
+
+Migration `20260818_0002` (parent `20260817_0001`) creates
+`entity_aliases` for Supplier, Equipment, and Material. Each row has exactly
+one typed foreign key. Register `Wärtsilä`, `Wartsila`, and `瓦锡兰` as three
+explicit rows when all three names refer to one canonical Supplier.
+
+Normalization applies Unicode NFKC, case folding, and whitespace collapse.
+It preserves accents and punctuation. No fuzzy matching, transliteration,
+candidate generation, or automatic merge occurs.
+
+Global aliases have no `source_system`. A source-specific lookup first checks
+the exact requested source and then falls back to the global alias; a lookup
+without a source checks only the global alias. The repository uses a
+caller-owned Session and transaction and returns fixed persistence errors
+without rejected values. Equipment resolution is additionally limited by the
+service's server-derived ship scope.
+
+Run the synthetic PostgreSQL tests only against the protected database:
+
+```bash
+TEST_DATABASE_URL=postgresql+psycopg://shipyard:shipyard_dev@127.0.0.1:55432/shipyard_ai_test \
+  python -m pytest tests/integration/test_entity_alias_repository.py -v
+```
