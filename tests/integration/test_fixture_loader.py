@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
@@ -161,12 +162,19 @@ def test_loader_preserves_provenance_relationships_cases_and_scope_mapping() -> 
         ),
         (
             "ships.json",
-            lambda value: value[0].update(source_system="erp"),
+            lambda value: value[0].update(
+                source_system="RAW-MUTATED-SENTINEL"
+            ),
             "provenance",
         ),
         (
             "ships.json",
             lambda value: value[0].update(unexpected=True),
+            "schema",
+        ),
+        (
+            "ships.json",
+            lambda value: value[0].pop("ship_code"),
             "schema",
         ),
         (
@@ -185,9 +193,73 @@ def test_loader_preserves_provenance_relationships_cases_and_scope_mapping() -> 
             "schema",
         ),
         (
+            "project_tasks.json",
+            lambda value: value[0].update(planned_progress=0.9),
+            "schema",
+        ),
+        (
+            "manifest.json",
+            lambda value: value.update(dataset_version=True),
+            "manifest",
+        ),
+        (
+            "manifest.json",
+            lambda value: value.update(as_of_date="20260818"),
+            "manifest",
+        ),
+        (
+            "ships.json",
+            lambda value: value[0].update(
+                planned_delivery_date="20270630"
+            ),
+            "schema",
+        ),
+        (
+            "ships.json",
+            lambda value: value[0].update(
+                source_updated_at="2026-08-18T00:00:00"
+            ),
+            "schema",
+        ),
+        (
+            "ship_systems.json",
+            lambda value: value[0].update(
+                ship_id="80000000-0000-0000-0000-000000000099"
+            ),
+            "relationship",
+        ),
+        (
+            "drawings.json",
+            lambda value: value[0].update(
+                system_id="80000000-0000-0000-0000-000000000012"
+            ),
+            "relationship",
+        ),
+        (
             "equipment.json",
             lambda value: value[0].update(
                 ship_id="80000000-0000-0000-0000-000000000002"
+            ),
+            "relationship",
+        ),
+        (
+            "bom_items.json",
+            lambda value: value[0].update(
+                drawing_id="80000000-0000-0000-0000-000000000022"
+            ),
+            "relationship",
+        ),
+        (
+            "purchase_orders.json",
+            lambda value: value[0].update(
+                ship_id="80000000-0000-0000-0000-000000000002"
+            ),
+            "relationship",
+        ),
+        (
+            "project_tasks.json",
+            lambda value: value[0].update(
+                ship_id="80000000-0000-0000-0000-000000000099"
             ),
             "relationship",
         ),
@@ -226,9 +298,10 @@ def test_loader_rejects_invalid_dataset_without_leaking_values(
     with pytest.raises(FixtureValidationError) as captured:
         load_shipyard_fixture_set(root)
     message = str(captured.value)
-    assert category in message
-    assert str(root) not in message
-    assert "SYN-ALPHA" not in message
+    assert re.fullmatch(
+        rf"{re.escape(file_name)}(?::\d+)?: {re.escape(category)}",
+        message,
+    )
 
 
 def test_loader_rejects_invalid_json_without_leaking_root(tmp_path: Path) -> None:
@@ -240,3 +313,13 @@ def test_loader_rejects_invalid_json_without_leaking_root(tmp_path: Path) -> Non
 
     assert str(captured.value) == "ships.json: invalid JSON"
     assert str(root) not in str(captured.value)
+
+
+def test_loader_rejects_invalid_utf8_without_leaking_root(tmp_path: Path) -> None:
+    root = _mutated_copy(tmp_path, "ships.json", lambda value: None)
+    (root / "ships.json").write_bytes(b"\xffRAW-MUTATED-SENTINEL")
+
+    with pytest.raises(FixtureValidationError) as captured:
+        load_shipyard_fixture_set(root)
+
+    assert str(captured.value) == "ships.json: invalid encoding"

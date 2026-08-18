@@ -102,6 +102,8 @@ def _read_json(root: Path, file_name: str) -> Any:
         _error(file_name, "schema")
     try:
         return json.loads((root / file_name).read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        _error(file_name, "invalid encoding")
     except json.JSONDecodeError:
         _error(file_name, "invalid JSON")
     except OSError:
@@ -206,7 +208,10 @@ def _date(record: JsonObject, field: str) -> date:
     value = record[field]
     if not isinstance(value, str):
         raise TypeError
-    return date.fromisoformat(value)
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError
+    return parsed
 
 
 def _optional_date(record: JsonObject, field: str) -> date | None:
