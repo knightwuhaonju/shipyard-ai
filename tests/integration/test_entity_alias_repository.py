@@ -418,6 +418,32 @@ def test_database_rejects_entity_type_and_typed_target_mismatch(
         migrated_session.flush()
 
 
+def test_corrupt_stored_alias_with_multiple_typed_targets_uses_safe_error() -> None:
+    from infra.postgres import AliasPersistenceError
+    from infra.postgres.alias_repository import _to_domain
+    from infra.postgres.models import EntityAliasModel
+
+    sensitive_alias = "corrupt-sensitive-alias"
+    corrupted = EntityAliasModel(
+        id=ALIAS_ID,
+        entity_type="supplier",
+        alias=sensitive_alias,
+        normalized_alias=sensitive_alias,
+        source_system=None,
+        supplier_id=SUPPLIER_ID,
+        equipment_id=EQUIPMENT_ID,
+        material_id=None,
+    )
+
+    with pytest.raises(AliasPersistenceError) as captured:
+        _to_domain(corrupted)
+
+    assert str(captured.value) == "stored entity alias is invalid"
+    assert sensitive_alias not in str(captured.value)
+    assert str(SUPPLIER_ID) not in str(captured.value)
+    assert str(EQUIPMENT_ID) not in str(captured.value)
+
+
 def test_resolve_rejects_blank_source_system_without_value_leak(
     migrated_session: Session,
 ) -> None:

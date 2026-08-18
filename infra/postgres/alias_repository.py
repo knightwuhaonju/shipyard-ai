@@ -47,12 +47,21 @@ def _to_domain(model: EntityAliasModel) -> EntityAlias:
         entity_type = AliasEntityType(model.entity_type)
     except ValueError:
         raise AliasPersistenceError("stored entity alias is invalid") from None
-    entity_id = {
-        AliasEntityType.SUPPLIER: model.supplier_id,
-        AliasEntityType.EQUIPMENT: model.equipment_id,
-        AliasEntityType.MATERIAL: model.material_id,
+    entity_id, non_target_ids = {
+        AliasEntityType.SUPPLIER: (
+            model.supplier_id,
+            (model.equipment_id, model.material_id),
+        ),
+        AliasEntityType.EQUIPMENT: (
+            model.equipment_id,
+            (model.supplier_id, model.material_id),
+        ),
+        AliasEntityType.MATERIAL: (
+            model.material_id,
+            (model.supplier_id, model.equipment_id),
+        ),
     }[entity_type]
-    if entity_id is None:
+    if entity_id is None or any(value is not None for value in non_target_ids):
         raise AliasPersistenceError("stored entity alias is invalid")
     try:
         alias = EntityAlias(
