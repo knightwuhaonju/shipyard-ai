@@ -386,6 +386,30 @@ def test_persistence_leaves_commit_and_rollback_to_caller(
     assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is None
 
 
+def test_persistence_revalidates_manual_fixture_before_writing(
+    migrated_session: Session,
+) -> None:
+    fixtures = load_shipyard_fixture_set()
+    cross_ship_equipment = replace(
+        fixtures.equipment[0],
+        ship_id=fixtures.ships[1].id,
+    )
+    invalid = replace(
+        fixtures,
+        equipment=(cross_ship_equipment, *fixtures.equipment[1:]),
+    )
+
+    with pytest.raises(
+        FixtureValidationError,
+        match=r"^equipment\.json:0: relationship$",
+    ):
+        persist_shipyard_fixture_set(migrated_session, invalid)
+
+    assert not migrated_session.in_transaction()
+    assert DomainRepository(migrated_session).get(Ship, ALPHA_SHIP_ID) is None
+    assert migrated_session.scalar(select(literal(1))) == 1
+
+
 def test_duplicate_persistence_fails_without_overwriting_first_dataset(
     migrated_session: Session,
 ) -> None:
