@@ -1,0 +1,26 @@
+[
+  {
+    "id": "80000000-0000-0000-0000-000000000021",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:drawing:alpha-cooling",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_id": "80000000-0000-0000-0000-000000000001",
+    "drawing_no": "SYN-DWG-A-001",
+    "title": "Synthetic Alpha Cooling Arrangement",
+    "revision": "A",
+    "system_id": "80000000-0000-0000-0000-000000000011",
+    "status": "APPROVED"
+  },
+  {
+    "id": "80000000-0000-0000-0000-000000000022",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:drawing:beta-electrical",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_id": "80000000-0000-0000-0000-000000000002",
+    "drawing_no": "SYN-DWG-B-001",
+    "title": "Synthetic Beta Electrical Arrangement",
+    "revision": "B",
+    "system_id": "80000000-0000-0000-0000-000000000012",
+    "status": "REVIEW"
+  }
+]

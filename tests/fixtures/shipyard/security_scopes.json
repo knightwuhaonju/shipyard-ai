@@ -1,0 +1,4 @@
+[
+  {"name":"ship-alpha-only","user_id":"synthetic-user-alpha","roles":[],"departments":[],"allowed_ship_ids":["80000000-0000-0000-0000-000000000001"],"allowed_project_ids":[],"security_clearance":"INTERNAL"},
+  {"name":"ship-beta-only","user_id":"synthetic-user-beta","roles":[],"departments":[],"allowed_ship_ids":["80000000-0000-0000-0000-000000000002"],"allowed_project_ids":[],"security_clearance":"INTERNAL"}
+]

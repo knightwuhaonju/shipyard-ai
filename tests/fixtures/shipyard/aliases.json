@@ -1,0 +1,7 @@
+[
+  {"id":"80000000-0000-0000-0000-000000000091","entity_type":"supplier","entity_id":"80000000-0000-0000-0000-000000000051","alias":"Synthetic Northstar Marine Systems","source_system":null},
+  {"id":"80000000-0000-0000-0000-000000000092","entity_type":"supplier","entity_id":"80000000-0000-0000-0000-000000000051","alias":"SNMS","source_system":null},
+  {"id":"80000000-0000-0000-0000-000000000093","entity_type":"supplier","entity_id":"80000000-0000-0000-0000-000000000051","alias":"合成北星船舶系统","source_system":null},
+  {"id":"80000000-0000-0000-0000-000000000094","entity_type":"equipment","entity_id":"80000000-0000-0000-0000-000000000031","alias":"Synthetic Alpha Main Cooling Pump","source_system":null},
+  {"id":"80000000-0000-0000-0000-000000000095","entity_type":"equipment","entity_id":"80000000-0000-0000-0000-000000000032","alias":"Synthetic Beta Main Generator","source_system":null}
+]

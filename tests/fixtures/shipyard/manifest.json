@@ -1,0 +1,18 @@
+{
+  "dataset_id": "synthetic-shipyard-v1",
+  "dataset_version": 1,
+  "synthetic": true,
+  "as_of_date": "2026-08-18",
+  "purchase_order_cases": {
+    "overdue_ids": ["80000000-0000-0000-0000-000000000071"],
+    "non_overdue_ids": [
+      "80000000-0000-0000-0000-000000000073",
+      "80000000-0000-0000-0000-000000000074"
+    ],
+    "delivered_ids": ["80000000-0000-0000-0000-000000000072"]
+  },
+  "security_scope_ships": {
+    "ship-alpha-only": "80000000-0000-0000-0000-000000000001",
+    "ship-beta-only": "80000000-0000-0000-0000-000000000002"
+  }
+}

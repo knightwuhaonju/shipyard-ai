@@ -1,0 +1,22 @@
+[
+  {
+    "id": "80000000-0000-0000-0000-000000000041",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:material:pipe-dn100",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "material_code": "SYN-MAT-PIPE-100",
+    "description": "Synthetic DN100 cooling pipe",
+    "specification": "SYN-SPEC-DN100",
+    "unit": "m"
+  },
+  {
+    "id": "80000000-0000-0000-0000-000000000042",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:material:cable-power",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "material_code": "SYN-MAT-CABLE-200",
+    "description": "Synthetic marine power cable",
+    "specification": "SYN-SPEC-CABLE-200",
+    "unit": "m"
+  }
+]

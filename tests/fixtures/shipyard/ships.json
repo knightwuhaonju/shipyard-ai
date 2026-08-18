@@ -1,0 +1,24 @@
+[
+  {
+    "id": "80000000-0000-0000-0000-000000000001",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:ship:alpha",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_code": "SYN-ALPHA",
+    "name": "Synthetic Vessel Alpha",
+    "customer_name": "Synthetic Customer Alpha",
+    "vessel_type": "Offshore Support Vessel",
+    "planned_delivery_date": "2027-06-30"
+  },
+  {
+    "id": "80000000-0000-0000-0000-000000000002",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:ship:beta",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_code": "SYN-BETA",
+    "name": "Synthetic Vessel Beta",
+    "customer_name": "Synthetic Customer Beta",
+    "vessel_type": "Research Vessel",
+    "planned_delivery_date": "2027-12-15"
+  }
+]

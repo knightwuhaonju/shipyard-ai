@@ -1,0 +1,22 @@
+[
+  {
+    "id": "80000000-0000-0000-0000-000000000061",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:bom:alpha-pipe",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "drawing_id": "80000000-0000-0000-0000-000000000021",
+    "equipment_id": "80000000-0000-0000-0000-000000000031",
+    "material_id": "80000000-0000-0000-0000-000000000041",
+    "quantity": "12.500"
+  },
+  {
+    "id": "80000000-0000-0000-0000-000000000062",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:bom:beta-cable",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "drawing_id": "80000000-0000-0000-0000-000000000022",
+    "equipment_id": "80000000-0000-0000-0000-000000000032",
+    "material_id": "80000000-0000-0000-0000-000000000042",
+    "quantity": "40.000"
+  }
+]

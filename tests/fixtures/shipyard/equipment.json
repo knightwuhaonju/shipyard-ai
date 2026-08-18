@@ -1,0 +1,26 @@
+[
+  {
+    "id": "80000000-0000-0000-0000-000000000031",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:equipment:alpha-pump",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_id": "80000000-0000-0000-0000-000000000001",
+    "equipment_code": "SYN-EQ-A-PUMP",
+    "system_id": "80000000-0000-0000-0000-000000000011",
+    "drawing_id": "80000000-0000-0000-0000-000000000021",
+    "manufacturer": "Synthetic Northstar Marine Systems",
+    "model": "NS-P100"
+  },
+  {
+    "id": "80000000-0000-0000-0000-000000000032",
+    "source_system": "synthetic-fixture",
+    "source_id": "synthetic:equipment:beta-generator",
+    "source_updated_at": "2026-08-18T00:00:00+00:00",
+    "ship_id": "80000000-0000-0000-0000-000000000002",
+    "equipment_code": "SYN-EQ-B-GEN",
+    "system_id": "80000000-0000-0000-0000-000000000012",
+    "drawing_id": "80000000-0000-0000-0000-000000000022",
+    "manufacturer": "Synthetic Meridian Electric",
+    "model": "ME-G200"
+  }
+]
