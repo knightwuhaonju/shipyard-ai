@@ -3,10 +3,49 @@ from uuid import UUID
 
 import pytest
 
-from packages.domain import DomainValidationError
+from packages.domain import (
+    AliasEntityType,
+    DomainValidationError,
+    EntityAlias,
+    normalize_alias,
+)
 
 ALIAS_ID = UUID("70000000-0000-0000-0000-000000000001")
 SUPPLIER_ID = UUID("70000000-0000-0000-0000-000000000002")
+
+
+class _FakeAliasReader:
+    def __init__(self, aliases: list[EntityAlias]) -> None:
+        self.aliases = aliases
+        self.calls: list[tuple[AliasEntityType, str, str | None]] = []
+
+    def resolve(
+        self,
+        entity_type: AliasEntityType,
+        raw_alias: str,
+        source_system: str | None = None,
+    ) -> EntityAlias | None:
+        self.calls.append((entity_type, raw_alias, source_system))
+        key = normalize_alias(raw_alias)
+        source_matches = [
+            alias
+            for alias in self.aliases
+            if alias.entity_type is entity_type
+            and alias.normalized_alias == key
+            and alias.source_system == source_system
+        ]
+        if source_system is not None and source_matches:
+            return source_matches[0]
+        return next(
+            (
+                alias
+                for alias in self.aliases
+                if alias.entity_type is entity_type
+                and alias.normalized_alias == key
+                and alias.source_system is None
+            ),
+            None,
+        )
 
 
 def test_explicit_brand_variants_keep_distinct_normalized_keys() -> None:
@@ -92,3 +131,51 @@ def test_entity_alias_rejects_invalid_fields(overrides: dict[str, object]) -> No
     values.update(overrides)
     with pytest.raises(DomainValidationError):
         EntityAlias(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "entity_type",
+    [AliasEntityType.SUPPLIER, AliasEntityType.MATERIAL],
+)
+def test_global_master_alias_resolves_for_authenticated_user(
+    entity_type: AliasEntityType,
+) -> None:
+    from packages.contracts.auth import UserContext
+    from services.entity_resolution import EntityResolutionService
+
+    alias = EntityAlias(
+        id=ALIAS_ID,
+        entity_type=entity_type,
+        entity_id=SUPPLIER_ID,
+        alias="explicit alias",
+    )
+    reader = _FakeAliasReader([alias])
+    service = EntityResolutionService(reader, lambda _: None)
+
+    assert service.resolve(
+        entity_type=entity_type,
+        raw_alias="EXPLICIT ALIAS",
+        user_context=UserContext(user_id="authenticated-user"),
+    ) == alias
+
+
+def test_resolution_does_not_create_or_suggest_fuzzy_aliases() -> None:
+    from packages.contracts.auth import UserContext
+    from services.entity_resolution import EntityResolutionService
+
+    explicit = EntityAlias(
+        id=ALIAS_ID,
+        entity_type=AliasEntityType.SUPPLIER,
+        entity_id=SUPPLIER_ID,
+        alias="Wartsila",
+    )
+    reader = _FakeAliasReader([explicit])
+    service = EntityResolutionService(reader, lambda _: None)
+
+    assert service.resolve(
+        entity_type=AliasEntityType.SUPPLIER,
+        raw_alias="Wartsilla",
+        user_context=UserContext(user_id="authenticated-user"),
+    ) is None
+    assert reader.aliases == [explicit]
+    assert reader.calls == [(AliasEntityType.SUPPLIER, "Wartsilla", None)]
