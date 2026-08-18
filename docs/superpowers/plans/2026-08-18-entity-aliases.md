@@ -786,8 +786,16 @@ def test_source_specific_alias_precedes_global_without_crossing_sources(
         alias="Shared code",
         source_system="erp-a",
     )
+    source_only_alias = EntityAlias(
+        id=UUID("72000000-0000-0000-0000-000000000010"),
+        entity_type=AliasEntityType.MATERIAL,
+        entity_id=material_b.id,
+        alias="Source only code",
+        source_system="erp-a",
+    )
     repository.insert(global_alias)
     repository.insert(source_alias)
+    repository.insert(source_only_alias)
     migrated_session.commit()
 
     assert repository.resolve(AliasEntityType.MATERIAL, "shared code") == global_alias
@@ -797,6 +805,10 @@ def test_source_specific_alias_precedes_global_without_crossing_sources(
     assert repository.resolve(
         AliasEntityType.MATERIAL, "shared code", "erp-b"
     ) == global_alias
+    assert repository.resolve(AliasEntityType.MATERIAL, "source only code") is None
+    assert repository.resolve(
+        AliasEntityType.MATERIAL, "source only code", "erp-b"
+    ) is None
 ```
 
 Add this typed-target round-trip after inserting a Ship, its Equipment, a
@@ -1065,6 +1077,55 @@ def test_alias_collision_does_not_reassign_and_entity_types_are_independent(
 
     assert repository.resolve(AliasEntityType.SUPPLIER, "shared code") == first
     assert repository.resolve(AliasEntityType.MATERIAL, "shared code") == material_alias
+
+
+def test_source_specific_collision_is_rejected_only_within_exact_source(
+    migrated_session: Session,
+) -> None:
+    from infra.postgres import (
+        AliasPersistenceError,
+        AliasRepository,
+        DomainRepository,
+    )
+
+    supplier = _supplier(SUPPLIER_ID, "supplier-source", "SUP-S", "Supplier")
+    DomainRepository(migrated_session).insert(supplier)
+    repository = AliasRepository(migrated_session)
+    first = EntityAlias(
+        id=UUID("72000000-0000-0000-0000-000000000011"),
+        entity_type=AliasEntityType.SUPPLIER,
+        entity_id=supplier.id,
+        alias="Source code",
+        source_system="erp-a",
+    )
+    duplicate_same_source = EntityAlias(
+        id=UUID("72000000-0000-0000-0000-000000000012"),
+        entity_type=AliasEntityType.SUPPLIER,
+        entity_id=supplier.id,
+        alias=" source  code ",
+        source_system="erp-a",
+    )
+    other_source = EntityAlias(
+        id=UUID("72000000-0000-0000-0000-000000000013"),
+        entity_type=AliasEntityType.SUPPLIER,
+        entity_id=supplier.id,
+        alias="source code",
+        source_system="erp-b",
+    )
+    repository.insert(first)
+    with pytest.raises(
+        AliasPersistenceError,
+        match="^entity alias violates persistence constraints$",
+    ):
+        repository.insert(duplicate_same_source)
+    repository.insert(other_source)
+
+    assert repository.resolve(
+        AliasEntityType.SUPPLIER, "source code", "erp-a"
+    ) == first
+    assert repository.resolve(
+        AliasEntityType.SUPPLIER, "source code", "erp-b"
+    ) == other_source
 
 
 def test_database_rejects_entity_type_and_typed_target_mismatch(
