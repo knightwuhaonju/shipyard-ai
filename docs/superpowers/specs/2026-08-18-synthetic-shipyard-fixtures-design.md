@@ -59,7 +59,8 @@ No production package imports `tests.fixtures`.
 - `synthetic = true`
 - fixed `as_of_date = "2026-08-18"`
 - named expected purchase-order cases
-- the two required security-scope names
+- a mapping from each of the two required security-scope names to its one
+  allowed ship UUID
 
 All sourced records use exactly `source_system = "synthetic-fixture"` and a
 `source_id` beginning with `synthetic:`. UUIDs are fixed literals in a Task 008
@@ -234,8 +235,9 @@ savepoint:
    same canonical type;
 6. validate every domain relationship against the relevant loaded ID set;
 7. ensure each alias targets an existing entity of its declared type;
-8. ensure there are exactly the two manifest-named security contexts, each
-   names an existing ship, and their allowed ship sets are mutually isolated;
+8. ensure there are exactly the two manifest-mapped security contexts, each
+   contains only its mapped existing ship UUID, and their allowed ship sets are
+   mutually isolated;
 9. ensure manifest case IDs refer to PurchaseOrders and satisfy the declared
    overdue/non-overdue/delivered scenario relative to `as_of_date`.
 
