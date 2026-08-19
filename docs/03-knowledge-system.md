@@ -94,18 +94,38 @@ library exception details.
 
 ## 3. Chunking
 
-Default to structure-aware chunking:
+`StructuralChunker` is a pure ingestion service with the boundary
+`ParsedDocument -> tuple[DocumentChunk, ...]`. It reads no files and performs
+no persistence. The default limit is 2,000 normalized Unicode characters per
+chunk and callers may configure another positive character limit. It does not
+use a tokenizer, so chunk boundaries are independent of model vendors.
 
-- heading
-- chapter
-- section
-- subsection
-- table region
-- paragraph group
+The chunker prefers parser-provided structure over size-only splitting:
 
-Do not cut purely by fixed token count unless no structural information exists.
+- same-context paragraphs group in source order, where context is the
+  structural path and page;
+- each body chunk normally includes its full heading-path prefix, while the
+  most specific path element becomes `section`;
+- PDF `PAGE` blocks keep their original one-based page number through every
+  split and never merge across pages;
+- an empty-path region uses a local unstructured fallback without changing how
+  later structured regions are chunked; and
+- a canonical TSV table stays whole when it fits. Only an oversized table uses
+  maximal consecutive row groups with the first row repeated as retrieval
+  context. The current legal parser `TABLE` contract does not carry a page.
 
-Chunks must be re-creatable deterministically from the same immutable version.
+Oversized structural units split deterministically at newline, then other
+Unicode whitespace, then exact Unicode code-point boundaries. There is no
+overlap. Final ordinals are global and contiguous, and each Chunk ID is the
+existing deterministic UUIDv5 over version, structural path, and ordinal. The
+same immutable version, parsed document, and configuration therefore recreate
+equal chunks and IDs.
+
+Chunking has no tokenizer, model, OCR, network, filesystem, persistence, or
+authorization behavior. ACL metadata remains on `DocumentVersion` and is
+inherited through `version_id`; authorization is enforced by later retrieval
+services. Optional scanned-PDF OCR remains Task 012 work and is not implemented
+by the chunker.
 
 ## 4. Retrieval
 

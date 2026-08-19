@@ -1,11 +1,14 @@
+import ast
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
+import services.ingestion as ingestion
 from packages.domain import DocumentChunk, document_chunk_id
-from services.ingestion.chunker import StructuralChunker
+from services.ingestion import DEFAULT_MAX_CHARS, StructuralChunker
 from services.ingestion.parser import (
     DocumentFormat,
     ParsedBlock,
@@ -15,6 +18,95 @@ from services.ingestion.parser import (
 )
 
 VERSION_ID = UUID("91000000-0000-0000-0000-000000000001")
+
+
+def test_ingestion_public_surface_exports_chunker_without_regressions() -> None:
+    existing_public_names = {
+        "DocumentChunkConflictError",
+        "DocumentConflictError",
+        "DocumentFormat",
+        "DocumentNotFoundError",
+        "DocumentRepository",
+        "DocumentRepositoryError",
+        "DocumentStore",
+        "DocumentStoreError",
+        "DocumentVersionConflictError",
+        "DocumentVersionNotFoundError",
+        "ParsedBlock",
+        "ParsedBlockKind",
+        "ParsedDocument",
+        "Parser",
+        "ParserError",
+        "ParserErrorCode",
+        "TableCells",
+        "normalize_block_text",
+        "normalize_table_cell",
+        "render_table",
+        "validate_source_bytes",
+    }
+
+    assert existing_public_names <= set(ingestion.__all__)
+    assert {"DEFAULT_MAX_CHARS", "StructuralChunker"} <= set(ingestion.__all__)
+    assert ingestion.DEFAULT_MAX_CHARS == DEFAULT_MAX_CHARS == 2_000
+    assert ingestion.StructuralChunker is StructuralChunker
+
+
+def test_chunker_imports_remain_inside_the_pure_service_boundary() -> None:
+    source_path = Path("services/ingestion/chunker.py")
+    tree = ast.parse(
+        source_path.read_text(encoding="utf-8"), filename=str(source_path)
+    )
+    allowed_import_roots = {"dataclasses", "packages", "services", "uuid"}
+    denied_import_prefixes = {
+        "adapters.ocr",
+        "anthropic",
+        "cohere",
+        "docx",
+        "google.generativeai",
+        "httpx",
+        "mistralai",
+        "openai",
+        "openpyxl",
+        "os",
+        "pathlib",
+        "pypdf",
+        "requests",
+        "services.retrieval",
+        "socket",
+        "sqlalchemy",
+        "subprocess",
+        "tiktoken",
+        "transformers",
+        "urllib",
+    }
+    imported_modules: set[str] = set()
+    imported_symbols: set[str] = set()
+    non_relative_roots: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                imported_modules.add(name.name)
+                non_relative_roots.add(name.name.split(".", maxsplit=1)[0])
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module != "__future__"
+            and node.module is not None
+        ):
+            imported_modules.add(node.module)
+            imported_symbols.update(name.name for name in node.names)
+            non_relative_roots.add(node.module.split(".", maxsplit=1)[0])
+
+    assert non_relative_roots <= allowed_import_roots
+    assert not any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for module in imported_modules
+        for prefix in denied_import_prefixes
+    )
+    assert not any("repository" in module.lower() for module in imported_modules)
+    assert "DocumentStore" not in imported_symbols
+    assert not any("repository" in symbol.lower() for symbol in imported_symbols)
 
 
 def _document(*blocks: ParsedBlock) -> ParsedDocument:
