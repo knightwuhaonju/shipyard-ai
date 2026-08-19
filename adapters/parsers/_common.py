@@ -11,6 +11,7 @@ import services.ingestion.parser as parser_contract
 from services.ingestion import ParserError, ParserErrorCode
 
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:/")
+_ZIP_ENCRYPTED_FLAG = 0x1
 
 
 def validate_ooxml_archive(content: bytes) -> None:
@@ -31,6 +32,7 @@ def validate_ooxml_archive(content: bytes) -> None:
         path = PurePosixPath(normalized_name)
         if (
             not normalized_name
+            or member.flag_bits & _ZIP_ENCRYPTED_FLAG
             or normalized_name in normalized_names
             or path.is_absolute()
             or _WINDOWS_ABSOLUTE_PATH.match(normalized_name) is not None

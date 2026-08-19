@@ -71,6 +71,25 @@ def _zip_with_declared_sizes(
     return bytes(content)
 
 
+def _docx_with_encrypted_content_types() -> bytes:
+    content = bytearray(synthetic_docx_bytes())
+    central_directory = content.index(b"PK\x01\x02")
+    while content[central_directory : central_directory + 4] == b"PK\x01\x02":
+        name_length = struct.unpack_from("<H", content, central_directory + 28)[0]
+        extra_length = struct.unpack_from("<H", content, central_directory + 30)[0]
+        comment_length = struct.unpack_from("<H", content, central_directory + 32)[0]
+        name_start = central_directory + 46
+        name = bytes(content[name_start : name_start + name_length])
+        if name == b"[Content_Types].xml":
+            flag_bits = struct.unpack_from("<H", content, central_directory + 8)[0]
+            struct.pack_into("<H", content, central_directory + 8, flag_bits | 0x1)
+            return bytes(content)
+        central_directory = (
+            name_start + name_length + extra_length + comment_length
+        )
+    raise AssertionError("synthetic DOCX lacks [Content_Types].xml")
+
+
 def _docx_with_external_relationship() -> bytes:
     source = BytesIO(synthetic_docx_bytes())
     output = BytesIO()
@@ -410,6 +429,13 @@ def test_docx_parser_translates_malformed_package_to_safe_typed_error() -> None:
 
     with pytest.raises(ParserError) as raised:
         DocxParser().parse(malformed)
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+def test_docx_parser_rejects_encrypted_zip_member_with_safe_typed_error() -> None:
+    with pytest.raises(ParserError) as raised:
+        DocxParser().parse(_docx_with_encrypted_content_types())
 
     _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
 
