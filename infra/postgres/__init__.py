@@ -6,6 +6,7 @@ from infra.postgres.document_models import (
     DocumentModel,
     DocumentVersionModel,
 )
+from infra.postgres.document_repository import PostgresDocumentRepository
 from infra.postgres.models import Base
 from infra.postgres.repositories import (
     DomainPersistenceError,
@@ -22,5 +23,6 @@ __all__ = [
     "DocumentVersionModel",
     "DomainPersistenceError",
     "DomainRepository",
+    "PostgresDocumentRepository",
     "UnsupportedDomainEntityError",
 ]
