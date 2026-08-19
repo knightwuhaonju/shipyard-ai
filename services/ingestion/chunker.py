@@ -191,6 +191,8 @@ def _table_drafts(
             continue
 
         row_text = _render_canonical_table_rows((row,))
+        if not row_text.strip():
+            continue
         drafts.extend(
             draft(fragment) for fragment in _split_text(row_text, body_budget)
         )

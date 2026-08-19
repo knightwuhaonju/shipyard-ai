@@ -177,6 +177,33 @@ def test_oversized_table_preserves_internal_blank_row_at_group_boundary() -> Non
     assert data_rows == ["A", "", "B"]
 
 
+@pytest.mark.parametrize(
+    ("table", "expected_text"),
+    [
+        ((("H",), ("",), ("B",)), ("B",)),
+        ((("", ""), ("", ""), ("B", "C")), ("B", "C")),
+    ],
+)
+def test_oversized_table_skips_unrepresentable_blank_fallback_row(
+    table: tuple[tuple[str, ...], ...], expected_text: tuple[str, ...]
+) -> None:
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=1).chunk(VERSION_ID, document)
+
+    assert tuple(chunk.normalized_text for chunk in chunks) == expected_text
+    assert all(chunk.normalized_text for chunk in chunks)
+    assert all(len(chunk.normalized_text) <= 1 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
+
+
 def test_single_oversized_data_row_uses_bounded_text_fallback() -> None:
     header = ("Code", "Requirement")
     row = ("A", "abcdefghijklmnopqrstuvwxyz")
