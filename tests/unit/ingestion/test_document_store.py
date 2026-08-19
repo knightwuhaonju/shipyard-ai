@@ -201,6 +201,23 @@ def test_register_version_rejects_conflicting_immutable_metadata(
         store.register_version(changed_version)
 
 
+def test_register_version_rejects_occupied_version_id_with_new_checksum() -> None:
+    repository = _MemoryDocumentRepository()
+    store = DocumentStore(repository)
+    original = _version()
+    store.register_document(_document())
+    store.register_version(original)
+
+    with pytest.raises(
+        DocumentVersionConflictError,
+        match="^document version metadata conflicts$",
+    ):
+        store.register_version(replace(original, checksum="b" * 64))
+
+    assert repository.version_writes == 1
+    assert store.list_versions(DOCUMENT_ID) == (original,)
+
+
 def test_register_version_requires_document_without_writing() -> None:
     repository = _MemoryDocumentRepository()
     store = DocumentStore(repository)

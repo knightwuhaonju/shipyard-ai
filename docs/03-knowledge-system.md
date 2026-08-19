@@ -3,21 +3,30 @@
 ## 1. Document model
 
 Document:
-- stable logical identity
+- stable logical source identity; its internal ID is not replaced by a
+  source-system ID
 
 DocumentVersion:
-- immutable content version
-- checksum
-- source URI
-- security metadata
+- immutable content and authorization snapshot
+- uniquely identified per Document and SHA-256 checksum
+- source URI and source-updated time
+- ship, project, department, and security-level ACL metadata
 - parsed artifact references
+- an identical retry returns the stored Version only when all immutable
+  metadata agrees; otherwise the registration conflicts and does not overwrite
+  the stored Version
 
 DocumentChunk:
-- deterministic ID derived from version + structural path + ordinal
+- deterministic UUIDv5 ID over canonical JSON containing version, structural
+  path, and ordinal
 - structural metadata
 - page/section
 - normalized text
-- embedding optional
+- inherits its ACL through its Version
+
+An empty structural path is reserved for the unstructured fallback. Embeddings
+are not stored by this document metadata schema; Task 014 owns embedding
+storage.
 
 ## 2. Ingestion
 

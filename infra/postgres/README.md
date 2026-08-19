@@ -86,6 +86,31 @@ If `TEST_DATABASE_URL` is absent, this PostgreSQL-specific module skips
 locally. CI always provisions PostgreSQL and supplies the variable, so the
 repository and migration tests are mandatory in the quality gate.
 
+## Immutable document metadata
+
+Migration `20260819_0003` (parent `20260818_0002`) creates the `documents`,
+`document_versions`, and `document_chunks` tables. `documents` holds a stable
+logical source identity. Each `document_versions` row is an immutable
+Document/checksum snapshot with source URI and time plus ship, project,
+department, and security-level ACL metadata. Each `document_chunks` row is a
+deterministic structural location within one Version.
+
+The document repository uses a caller-owned SQLAlchemy Session and transaction:
+it flushes through nested savepoints but never commits, updates, deletes, or
+upserts records. A duplicate Document source identity or per-Document checksum
+is rejected by persistence constraints. At the service boundary, an identical
+Version retry returns the stored immutable row only when its metadata agrees;
+conflicting immutable metadata or an occupied version ID raises a conflict and
+does not insert another Version.
+
+Run the synthetic document integration tests only against the protected
+database:
+
+```bash
+TEST_DATABASE_URL=postgresql+psycopg://shipyard:shipyard_dev@127.0.0.1:55432/shipyard_ai_test \
+  python -m pytest tests/integration/test_document_versions.py -v
+```
+
 ## Entity aliases
 
 Migration `20260818_0002` (parent `20260817_0001`) creates
