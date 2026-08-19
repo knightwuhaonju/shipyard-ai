@@ -14,6 +14,7 @@ from services.ingestion.document_store import (
     DocumentConflictError,
     DocumentNotFoundError,
     DocumentRepository,
+    DocumentRepositoryError,
     DocumentStore,
     DocumentVersionConflictError,
     DocumentVersionNotFoundError,
@@ -86,6 +87,44 @@ class _MemoryDocumentRepository:
         return tuple(self.chunks_by_version.get(version_id, []))
 
 
+class _DocumentInsertFailureRepository(_MemoryDocumentRepository):
+    """Expose a concurrent Document winner before an insert failure returns."""
+
+    def __init__(
+        self,
+        *,
+        winner: Document | None,
+        failure: DocumentRepositoryError,
+    ) -> None:
+        super().__init__()
+        self._winner = winner
+        self._failure = failure
+
+    def insert_document(self, document: Document) -> None:
+        if self._winner is not None:
+            super().insert_document(self._winner)
+        raise self._failure
+
+
+class _VersionInsertFailureRepository(_MemoryDocumentRepository):
+    """Expose a concurrent Version winner before an insert failure returns."""
+
+    def __init__(
+        self,
+        *,
+        winner: DocumentVersion | None,
+        failure: DocumentRepositoryError,
+    ) -> None:
+        super().__init__()
+        self._winner = winner
+        self._failure = failure
+
+    def insert_version(self, version: DocumentVersion) -> None:
+        if self._winner is not None:
+            super().insert_version(self._winner)
+        raise self._failure
+
+
 def _document(**changes: object) -> Document:
     values: dict[str, object] = {
         "document_id": DOCUMENT_ID,
@@ -155,6 +194,98 @@ def test_versions_with_different_checksums_coexist() -> None:
     )
 
     assert store.list_versions(document.document_id) == (first, second)
+
+
+def test_register_document_returns_exact_winner_after_insert_race() -> None:
+    proposed = _document()
+    winner = replace(proposed)
+    repository = _DocumentInsertFailureRepository(
+        winner=winner,
+        failure=DocumentRepositoryError("synthetic document insert race"),
+    )
+
+    assert DocumentStore(repository).register_document(proposed) is winner
+
+
+@pytest.mark.parametrize(
+    "winner",
+    [
+        replace(_document(), source_id="occupied-other-source"),
+        replace(_document(), document_id=DOCUMENT_CONFLICT_ID),
+    ],
+)
+def test_register_document_maps_raced_identity_conflict_to_domain_error(
+    winner: Document,
+) -> None:
+    repository = _DocumentInsertFailureRepository(
+        winner=winner,
+        failure=DocumentRepositoryError("synthetic document insert race"),
+    )
+
+    with pytest.raises(
+        DocumentConflictError, match="^document source identity conflicts$"
+    ):
+        DocumentStore(repository).register_document(_document())
+
+
+def test_register_document_reraises_unrelated_insert_failure() -> None:
+    failure = DocumentRepositoryError("synthetic unrelated document failure")
+    repository = _DocumentInsertFailureRepository(winner=None, failure=failure)
+
+    with pytest.raises(DocumentRepositoryError) as captured:
+        DocumentStore(repository).register_document(_document())
+
+    assert captured.value is failure
+
+
+def test_register_version_returns_exact_checksum_winner_after_insert_race() -> None:
+    proposed = _version()
+    winner = replace(proposed, version_id=VERSION_RETRY_ID)
+    repository = _VersionInsertFailureRepository(
+        winner=winner,
+        failure=DocumentRepositoryError("synthetic version insert race"),
+    )
+    repository.insert_document(_document())
+
+    assert DocumentStore(repository).register_version(proposed) is winner
+
+
+@pytest.mark.parametrize(
+    "winner",
+    [
+        replace(_version(), checksum="b" * 64),
+        replace(
+            _version(),
+            version_id=VERSION_RETRY_ID,
+            source_uri="s3://synthetic-documents/conflicting-race.pdf",
+        ),
+    ],
+)
+def test_register_version_maps_raced_identity_conflict_to_domain_error(
+    winner: DocumentVersion,
+) -> None:
+    repository = _VersionInsertFailureRepository(
+        winner=winner,
+        failure=DocumentRepositoryError("synthetic version insert race"),
+    )
+    repository.insert_document(_document())
+
+    with pytest.raises(
+        DocumentVersionConflictError,
+        match="^document version metadata conflicts$",
+    ):
+        DocumentStore(repository).register_version(_version())
+
+
+def test_register_version_reraises_unrelated_insert_failure() -> None:
+    failure = DocumentRepositoryError("synthetic unrelated version failure")
+    repository = _VersionInsertFailureRepository(winner=None, failure=failure)
+    repository.insert_document(_document())
+
+    with pytest.raises(DocumentRepositoryError) as captured:
+        DocumentStore(repository).register_version(_version())
+
+    assert captured.value is failure
 
 
 @pytest.mark.parametrize(

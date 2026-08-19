@@ -1,7 +1,9 @@
 """Integration coverage for document schema metadata and persistence."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from threading import Barrier
 from typing import cast
 from uuid import UUID
 
@@ -107,6 +109,54 @@ def _chunk(
     }
     values.update(changes)
     return DocumentChunk(**values)  # type: ignore[arg-type]
+
+
+class _DocumentInsertBarrierRepository(PostgresDocumentRepository):
+    """Coordinate two sessions after service pre-checks and before insert."""
+
+    def __init__(self, session: Session, barrier: Barrier) -> None:
+        super().__init__(session)
+        self._barrier = barrier
+
+    def insert_document(self, document: Document) -> None:
+        self._barrier.wait(timeout=30)
+        super().insert_document(document)
+
+
+class _VersionInsertBarrierRepository(PostgresDocumentRepository):
+    """Coordinate two sessions after service pre-checks and before insert."""
+
+    def __init__(self, session: Session, barrier: Barrier) -> None:
+        super().__init__(session)
+        self._barrier = barrier
+
+    def insert_version(self, version: DocumentVersion) -> None:
+        self._barrier.wait(timeout=30)
+        super().insert_version(version)
+
+
+def _register_document_and_commit(
+    engine: Engine,
+    barrier: Barrier,
+    document: Document,
+) -> Document:
+    with Session(engine) as session:
+        store = DocumentStore(_DocumentInsertBarrierRepository(session, barrier))
+        registered = store.register_document(document)
+        session.commit()
+        return registered
+
+
+def _register_version_and_commit(
+    engine: Engine,
+    barrier: Barrier,
+    version: DocumentVersion,
+) -> DocumentVersion:
+    with Session(engine) as session:
+        store = DocumentStore(_VersionInsertBarrierRepository(session, barrier))
+        registered = store.register_version(version)
+        session.commit()
+        return registered
 
 
 def _invalid_persistence_model(case: str) -> DocumentPersistenceModel:
@@ -318,6 +368,74 @@ def test_document_versions_and_chunks_round_trip_and_coexist(
     assert first.ship_id == SHIP_ID
     assert first.project_id == PROJECT_ID
     assert first.department == "Synthetic Engineering"
+
+
+def test_concurrent_identical_document_registration_returns_one_stored_row(
+    migrated_engine: Engine,
+) -> None:
+    document = _document()
+    barrier = Barrier(2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = tuple(
+            executor.submit(
+                _register_document_and_commit,
+                migrated_engine,
+                barrier,
+                document,
+            )
+            for _ in range(2)
+        )
+        registered = tuple(future.result(timeout=30) for future in futures)
+
+    with Session(migrated_engine) as session:
+        stored = PostgresDocumentRepository(session).get_document(document.document_id)
+        rows = tuple(session.scalars(select(DocumentModel)))
+
+    assert stored == document
+    assert registered == (stored, stored)
+    assert len(rows) == 1
+
+
+def test_concurrent_identical_checksum_registration_returns_one_stored_version(
+    migrated_engine: Engine,
+) -> None:
+    with Session(migrated_engine) as session:
+        DomainRepository(session).insert(_ship())
+        PostgresDocumentRepository(session).insert_document(_document())
+        session.commit()
+
+    first_proposal = _version()
+    second_proposal = replace(first_proposal, version_id=VERSION_B_ID)
+    barrier = Barrier(2)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (
+            executor.submit(
+                _register_version_and_commit,
+                migrated_engine,
+                barrier,
+                first_proposal,
+            ),
+            executor.submit(
+                _register_version_and_commit,
+                migrated_engine,
+                barrier,
+                second_proposal,
+            ),
+        )
+        registered = tuple(future.result(timeout=30) for future in futures)
+
+    with Session(migrated_engine) as session:
+        stored = PostgresDocumentRepository(session).find_version(
+            DOCUMENT_ID, first_proposal.checksum
+        )
+        rows = tuple(session.scalars(select(DocumentVersionModel)))
+
+    assert stored is not None
+    assert registered == (stored, stored)
+    assert stored.version_id in {VERSION_A_ID, VERSION_B_ID}
+    assert len(rows) == 1
 
 
 def test_repository_leaves_transaction_ownership_with_caller(

@@ -73,7 +73,20 @@ class DocumentStore:
             document.source_system, document.source_id
         )
         if by_id is None and by_source is None:
-            self._repository.insert_document(document)
+            try:
+                self._repository.insert_document(document)
+            except DocumentRepositoryError:
+                by_id = self._repository.get_document(document.document_id)
+                by_source = self._repository.find_document(
+                    document.source_system, document.source_id
+                )
+                if by_id == document and by_source == document:
+                    return by_source
+                if by_id is not None or by_source is not None:
+                    raise DocumentConflictError(
+                        "document source identity conflicts"
+                    ) from None
+                raise
             return document
         if by_id == document and by_source == document:
             return document
@@ -95,7 +108,24 @@ class DocumentStore:
         if by_id is not None:
             raise DocumentVersionConflictError("document version metadata conflicts")
 
-        self._repository.insert_version(version)
+        try:
+            self._repository.insert_version(version)
+        except DocumentRepositoryError:
+            by_id = self._repository.get_version(version.version_id)
+            by_checksum = self._repository.find_version(
+                version.document_id, version.checksum
+            )
+            if (
+                by_checksum is not None
+                and self._version_payload(by_checksum) == self._version_payload(version)
+                and (by_id is None or by_id == by_checksum)
+            ):
+                return by_checksum
+            if by_id is not None or by_checksum is not None:
+                raise DocumentVersionConflictError(
+                    "document version metadata conflicts"
+                ) from None
+            raise
         return version
 
     def add_chunks(
