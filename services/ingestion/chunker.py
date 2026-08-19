@@ -175,7 +175,9 @@ def _table_drafts(
     def flush_rows() -> None:
         if not current_rows:
             return
-        drafts.append(draft(_render_canonical_table_rows((header, *current_rows))))
+        rendered_group = _render_canonical_table_rows((header, *current_rows))
+        if rendered_group.strip():
+            drafts.append(draft(rendered_group))
         current_rows.clear()
 
     for row in table[1:]:

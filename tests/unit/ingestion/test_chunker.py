@@ -177,6 +177,41 @@ def test_oversized_table_preserves_internal_blank_row_at_group_boundary() -> Non
     assert data_rows == ["A", "", "B"]
 
 
+def test_fitting_table_preserves_empty_header_and_internal_blank_row() -> None:
+    table = (("",), ("",), ("B",))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=3).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["\n\nB"]
+
+
+def test_oversized_table_skips_blank_group_at_flush_boundary() -> None:
+    table = (("",), ("",), ("B",))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=1).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["B"]
+    assert all(chunk.normalized_text for chunk in chunks)
+    assert all(len(chunk.normalized_text) <= 1 for chunk in chunks)
+    assert [chunk.ordinal for chunk in chunks] == [0]
+
+
 @pytest.mark.parametrize(
     ("table", "expected_text"),
     [
