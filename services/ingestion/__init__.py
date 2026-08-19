@@ -11,6 +11,20 @@ from services.ingestion.document_store import (
     DocumentVersionConflictError,
     DocumentVersionNotFoundError,
 )
+from services.ingestion.parser import (
+    DocumentFormat,
+    ParsedBlock,
+    ParsedBlockKind,
+    ParsedDocument,
+    Parser,
+    ParserError,
+    ParserErrorCode,
+    TableCells,
+    normalize_block_text,
+    normalize_table_cell,
+    render_table,
+    validate_source_bytes,
+)
 
 __all__ = [
     "DocumentChunkConflictError",
@@ -22,4 +36,16 @@ __all__ = [
     "DocumentStoreError",
     "DocumentVersionConflictError",
     "DocumentVersionNotFoundError",
+    "DocumentFormat",
+    "ParsedBlock",
+    "ParsedBlockKind",
+    "ParsedDocument",
+    "Parser",
+    "ParserError",
+    "ParserErrorCode",
+    "TableCells",
+    "normalize_block_text",
+    "normalize_table_cell",
+    "render_table",
+    "validate_source_bytes",
 ]
