@@ -463,18 +463,23 @@ def test_operational_text_and_progress_fields_reject_unvalidated_values() -> Non
         )
 
 
-def test_public_domain_api_exports_all_task_005_types() -> None:
+def test_public_domain_api_exports_all_public_domain_types() -> None:
     import packages.domain as domain
 
     expected = {
         "AliasEntityType",
         "BOMItem",
         "DomainValidationError",
+        "Document",
+        "DocumentChunk",
+        "DocumentValidationError",
+        "DocumentVersion",
         "Drawing",
         "Equipment",
         "EntityAlias",
         "Material",
         "normalize_alias",
+        "document_chunk_id",
         "PositiveQuantity",
         "Progress",
         "ProjectTask",
@@ -586,6 +591,7 @@ def _assert_domain_imports_allowed(domain_root: Path) -> None:
             module_name.split(".", 1)[0] in sys.stdlib_module_names
             or module_name == "packages.domain"
             or module_name.startswith("packages.domain.")
+            or module_name == "packages.common.security"
         )
 
     for module_path in domain_root.rglob("*.py"):

@@ -112,6 +112,20 @@ def test_document_chunk_id_is_stable_and_path_boundary_safe() -> None:
     assert chunk.chunk_id == first
 
 
+def test_document_chunk_accepts_empty_path_and_is_immutable() -> None:
+    chunk = DocumentChunk(
+        chunk_id=document_chunk_id(VERSION_ID, (), 0),
+        version_id=VERSION_ID,
+        structural_path=(),
+        ordinal=0,
+        normalized_text="Synthetic unstructured fallback paragraph.",
+    )
+
+    assert chunk.structural_path == ()
+    with pytest.raises(FrozenInstanceError):
+        chunk.normalized_text = "Changed"  # type: ignore[misc]
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
