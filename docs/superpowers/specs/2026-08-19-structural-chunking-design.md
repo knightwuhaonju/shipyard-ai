@@ -202,10 +202,26 @@ When a table exceeds the budget:
 3. the header is repeated in every row-group chunk; and
 4. row order is preserved exactly.
 
-If the header plus one data row cannot fit, that data row uses deterministic
-text splitting while retaining the same path, page, section, and source order.
-If the header itself cannot fit, the canonical TSV text uses the generic text
-splitter. This is the only fallback that may split within one table row.
+If a non-blank header fits but the header plus one data row cannot fit, the
+bounded canonical header is emitted as a standalone context Chunk immediately
+before that data row's deterministic text fragments. The header is repeated in
+that position for every individually oversized data row. An all-whitespace or
+empty header does not create a blank header Chunk. Every fragment retains the
+same path, page, section, and source order. If the header itself cannot fit,
+the canonical TSV text uses the generic text splitter. These fallbacks are the
+only ones that may split within one table row.
+
+Canonical all-empty internal rows remain present when they fit inside a
+non-blank table group. An all-empty row that can only become a standalone
+whitespace-only `DocumentChunk` is omitted because the domain forbids blank
+Chunk text and split-boundary whitespace is not source content. A richer
+blank-row representation would require a deliberate domain-contract change.
+
+The generic splitter advances an offset over the original normalized string
+and examines only the current bounded window. Table packing canonicalizes each
+row once, tracks candidate length incrementally, and renders an accumulated
+group only when it is flushed. These implementation invariants avoid repeated
+full-suffix copies and repeated rendering of every accumulated row.
 
 Repeated headers are intentional retrieval context, not new source claims.
 The persisted `DocumentChunk` schema has no table field, so the chunk text is

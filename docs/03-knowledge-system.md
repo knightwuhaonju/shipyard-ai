@@ -112,7 +112,17 @@ The chunker prefers parser-provided structure over size-only splitting:
   later structured regions are chunked; and
 - a canonical TSV table stays whole when it fits. Only an oversized table uses
   maximal consecutive row groups with the first row repeated as retrieval
-  context. The current legal parser `TABLE` contract does not carry a page.
+  context. If a non-blank header fits but cannot share a chunk with one
+  oversized data row, the header is emitted as a standalone context chunk
+  immediately before that row's fragments and is repeated for each such row.
+  An empty or all-whitespace header never creates a blank chunk. The current
+  legal parser `TABLE` contract does not carry a page.
+
+Canonical all-empty table rows are preserved when they fit inside a non-blank
+table chunk. If an all-empty row could only be emitted as a standalone
+whitespace-only chunk, it is omitted because `DocumentChunk` forbids blank
+text and split-boundary whitespace is discarded. Representing that boundary
+independently would require a future, deliberate domain-contract change.
 
 Oversized structural units split deterministically at newline, then other
 Unicode whitespace, then exact Unicode code-point boundaries. There is no

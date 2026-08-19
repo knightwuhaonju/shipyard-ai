@@ -70,15 +70,15 @@ def _split_text(text: str, budget: int) -> tuple[str, ...]:
         return (text,)
 
     fragments: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= budget:
-            fragment = remaining.strip()
+    offset = 0
+    while offset < len(text):
+        if len(text) - offset <= budget:
+            fragment = text[offset:].strip()
             if fragment:
                 fragments.append(fragment)
             break
 
-        window = remaining[:budget]
+        window = text[offset : offset + budget]
         boundary = window.rfind("\n")
         if boundary < 0:
             boundary = next(
@@ -91,11 +91,11 @@ def _split_text(text: str, budget: int) -> tuple[str, ...]:
             )
 
         if boundary >= 0:
-            fragment = remaining[:boundary].strip()
-            remaining = remaining[boundary + 1 :]
+            fragment = window[:boundary].strip()
+            offset += boundary + 1
         else:
-            fragment = remaining[:budget].strip()
-            remaining = remaining[budget:]
+            fragment = window.strip()
+            offset += budget
         if fragment:
             fragments.append(fragment)
 
@@ -164,37 +164,45 @@ def _table_drafts(
         return (draft(block.text),)
 
     header = table[0]
-    if len(_render_canonical_table_rows((header,))) > body_budget:
+    header_text = _render_canonical_table_rows((header,))
+    if len(header_text) > body_budget:
         return tuple(
             draft(fragment) for fragment in _split_text(block.text, body_budget)
         )
 
     drafts: list[_ChunkDraft] = []
     current_rows: list[tuple[str, ...]] = []
+    current_rendered_length = len(header_text)
 
     def flush_rows() -> None:
+        nonlocal current_rendered_length
         if not current_rows:
             return
         rendered_group = _render_canonical_table_rows((header, *current_rows))
         if rendered_group.strip():
             drafts.append(draft(rendered_group))
         current_rows.clear()
+        current_rendered_length = len(header_text)
 
     for row in table[1:]:
-        candidate = _render_canonical_table_rows((header, *current_rows, row))
-        if len(candidate) <= body_budget:
+        row_text = _render_canonical_table_rows((row,))
+        candidate_length = current_rendered_length + 1 + len(row_text)
+        if candidate_length <= body_budget:
             current_rows.append(row)
+            current_rendered_length = candidate_length
             continue
 
         flush_rows()
-        candidate = _render_canonical_table_rows((header, row))
-        if len(candidate) <= body_budget:
+        candidate_length = len(header_text) + 1 + len(row_text)
+        if candidate_length <= body_budget:
             current_rows.append(row)
+            current_rendered_length = candidate_length
             continue
 
-        row_text = _render_canonical_table_rows((row,))
         if not row_text.strip():
             continue
+        if header_text.strip():
+            drafts.append(draft(header_text))
         drafts.extend(
             draft(fragment) for fragment in _split_text(row_text, body_budget)
         )

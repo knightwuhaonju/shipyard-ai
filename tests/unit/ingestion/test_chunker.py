@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 import services.ingestion as ingestion
+import services.ingestion.chunker as chunker_module
 from packages.domain import DocumentChunk, document_chunk_id
 from services.ingestion import DEFAULT_MAX_CHARS, StructuralChunker
 from services.ingestion.parser import (
@@ -318,7 +319,7 @@ def test_oversized_table_skips_blank_group_at_flush_boundary() -> None:
 @pytest.mark.parametrize(
     ("table", "expected_text"),
     [
-        ((("H",), ("",), ("B",)), ("B",)),
+        ((("H",), ("",), ("B",)), ("H", "B")),
         ((("", ""), ("", ""), ("B", "C")), ("B", "C")),
     ],
 )
@@ -358,12 +359,83 @@ def test_single_oversized_data_row_uses_bounded_text_fallback() -> None:
     chunks = StructuralChunker(max_chars=20).chunk(VERSION_ID, document)
 
     assert [chunk.normalized_text for chunk in chunks] == [
+        "Code\tRequirement",
         "A",
         "abcdefghijklmnopqrst",
         "uvwxyz",
     ]
     assert all(chunk.normalized_text for chunk in chunks)
     assert all(len(chunk.normalized_text) <= 20 for chunk in chunks)
+
+
+def test_each_oversized_data_row_repeats_header_before_its_fragments() -> None:
+    header = ("K", "Meaning")
+    row_a = ("A", "abcdefghijklmnop")
+    row_b = ("B", "qrstuvwxyzabcdef")
+    table = (header, row_a, row_b)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=10).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "K\tMeaning",
+        "A",
+        "abcdefghij",
+        "klmnop",
+        "K\tMeaning",
+        "B",
+        "qrstuvwxyz",
+        "abcdef",
+    ]
+    assert [chunk.ordinal for chunk in chunks] == list(range(8))
+    assert all(
+        chunk.chunk_id
+        == document_chunk_id(VERSION_ID, chunk.structural_path, chunk.ordinal)
+        for chunk in chunks
+    )
+
+
+def test_table_packing_bounds_total_canonical_row_rendering_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_renderer = chunker_module._render_canonical_table_rows
+    rendered_row_count = 0
+
+    def counting_renderer(rows: tuple[tuple[str, ...], ...]) -> str:
+        nonlocal rendered_row_count
+        rendered_row_count += len(rows)
+        return original_renderer(rows)
+
+    monkeypatch.setattr(
+        chunker_module, "_render_canonical_table_rows", counting_renderer
+    )
+    data_row_count = 200
+    table = (("H",),) + (("x",),) * data_row_count
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=data_row_count).chunk(VERSION_ID, document)
+
+    assert len(chunks) == 3
+    assert all(chunk.normalized_text.startswith("H\n") for chunk in chunks)
+    rendered_data_row_count = sum(
+        chunk.normalized_text.split("\n")[1:].count("x") for chunk in chunks
+    )
+    assert rendered_data_row_count == data_row_count
+    assert rendered_row_count <= 3 * data_row_count + 10
 
 
 def test_oversized_table_header_uses_generic_canonical_tsv_fallback() -> None:
@@ -467,7 +539,9 @@ def test_table_fragments_preserve_prefix_path_and_leaf_section() -> None:
     chunks = StructuralChunker(max_chars=12).chunk(VERSION_ID, document)
 
     assert [chunk.normalized_text for chunk in chunks] == [
+        "Rules\n\nH",
         "Rules\n\nalpha",
+        "Rules\n\nH",
         "Rules\n\nbravo",
     ]
     assert all(chunk.structural_path == path for chunk in chunks)
@@ -700,6 +774,23 @@ def test_fallback_single_word_uses_exact_code_point_slices_without_overlap() -> 
 
     assert [chunk.normalized_text for chunk in chunks] == ["abcd", "efgh", "ij"]
     assert "".join(chunk.normalized_text for chunk in chunks) == "abcdefghij"
+
+
+def test_large_hard_boundary_fallback_preserves_every_code_point_in_order() -> None:
+    text = "甲" * 50_003
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=text,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=97).chunk(VERSION_ID, document)
+
+    assert "".join(chunk.normalized_text for chunk in chunks) == text
+    assert all(len(chunk.normalized_text) == 97 for chunk in chunks[:-1])
+    assert len(chunks[-1].normalized_text) == 48
 
 
 def test_prefix_is_omitted_when_exact_boundary_leaves_no_body_room() -> None:

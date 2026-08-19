@@ -295,7 +295,13 @@ Add:
 def _split_text(text: str, budget: int) -> tuple[str, ...]: ...
 ```
 
-The implementation repeatedly selects at most `budget` code points from the remaining text. Within that window it prefers the last `"\n"`; otherwise the last Unicode whitespace; otherwise it cuts at exactly `budget`. Strip only the chosen fragment's outer whitespace and consume the chosen delimiter so every iteration makes forward progress. Do not use tokenization, regex backtracking over the complete document, or overlap.
+The implementation advances an offset over the original text and selects at
+most `budget` code points from the current bounded window. Within that window
+it prefers the last `"\n"`; otherwise the last Unicode whitespace; otherwise
+it cuts at exactly `budget`. Strip only the chosen fragment's outer whitespace
+and consume the chosen delimiter so every iteration makes forward progress.
+Do not repeatedly copy the complete remaining suffix, use tokenization, apply
+regex backtracking over the complete document, or add overlap.
 
 If the input is already within budget, return it as one element without changing internal whitespace. Empty fragments are skipped, and a non-blank input must produce at least one fragment.
 
@@ -426,13 +432,24 @@ Require `block.table` through the existing validated `ParsedBlock` contract. Fir
 For an oversized table:
 
 - use `block.table[0]` as the header;
-- iterate remaining rows in order;
-- render `tuple([header, *candidate_rows])` through the existing `render_table`;
+- canonicalize the header and each remaining row once;
+- iterate remaining rows in order while tracking the candidate rendered length
+  incrementally;
 - retain the largest candidate whose decorated result fits;
-- flush before adding the first row that would exceed the budget; and
+- flush and render the accumulated group before adding the first row that
+  would exceed the budget; and
 - retry that row as the first row of the next group.
 
-When `header + row` cannot fit, flush any prior group and pass the canonical rendered row text through `_split_text` using the available body budget. Preserve path, page, section derivation, and global output order. When the header itself cannot fit, split `block.text` generically rather than looping on an impossible row group.
+When `header + row` cannot fit, flush any prior group. If the bounded canonical
+header is non-blank, emit it as a standalone context Chunk immediately before
+the canonical row fragments, repeating it for every individually oversized
+data row. An all-whitespace or empty header emits no blank context Chunk. Pass
+the canonical row text through `_split_text` using the available body budget,
+preserving path, page, section derivation, and global output order. Preserve
+canonical all-empty rows when they fit in a non-blank group; omit only an
+all-empty fallback row that could produce nothing except a forbidden
+whitespace-only `DocumentChunk`. When the header itself cannot fit, split
+`block.text` generically rather than looping on an impossible row group.
 
 - [ ] **Step 4: Add table boundary and safety tests**
 
