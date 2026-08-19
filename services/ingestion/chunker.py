@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from packages.domain import DocumentChunk, document_chunk_id
-from services.ingestion.parser import ParsedBlock, ParsedBlockKind, ParsedDocument
+from services.ingestion.parser import (
+    ParsedBlock,
+    ParsedBlockKind,
+    ParsedDocument,
+    render_table,
+)
 
 DEFAULT_MAX_CHARS = 2_000
 
@@ -138,6 +143,59 @@ def _pack_paragraphs(
     return tuple(drafts)
 
 
+def _table_drafts(
+    block: ParsedBlock, max_chars: int
+) -> tuple[_ChunkDraft, ...]:
+    table = block.table
+    assert table is not None
+    _, body_budget = _body_budget(block.structural_path, max_chars)
+
+    def draft(body: str) -> _ChunkDraft:
+        return _ChunkDraft(
+            structural_path=block.structural_path,
+            normalized_text=_decorate(block.structural_path, body, max_chars),
+            page=block.page,
+        )
+
+    if len(block.text) <= body_budget:
+        return (draft(block.text),)
+
+    header = table[0]
+    if len(render_table((header,))) > body_budget:
+        return tuple(
+            draft(fragment) for fragment in _split_text(block.text, body_budget)
+        )
+
+    drafts: list[_ChunkDraft] = []
+    current_rows: list[tuple[str, ...]] = []
+
+    def flush_rows() -> None:
+        if not current_rows:
+            return
+        drafts.append(draft(render_table((header, *current_rows))))
+        current_rows.clear()
+
+    for row in table[1:]:
+        candidate = render_table((header, *current_rows, row))
+        if len(candidate) <= body_budget:
+            current_rows.append(row)
+            continue
+
+        flush_rows()
+        candidate = render_table((header, row))
+        if len(candidate) <= body_budget:
+            current_rows.append(row)
+            continue
+
+        row_text = render_table((row,))
+        drafts.extend(
+            draft(fragment) for fragment in _split_text(row_text, body_budget)
+        )
+
+    flush_rows()
+    return tuple(drafts)
+
+
 def _materialize(
     version_id: UUID, drafts: list[_ChunkDraft]
 ) -> tuple[DocumentChunk, ...]:
@@ -210,15 +268,7 @@ def _structured_drafts(
 
         if block.kind is ParsedBlockKind.TABLE:
             flush_paragraphs()
-            drafts.append(
-                _ChunkDraft(
-                    structural_path=block.structural_path,
-                    normalized_text=_decorate(
-                        block.structural_path, block.text, max_chars
-                    ),
-                    page=block.page,
-                )
-            )
+            drafts.extend(_table_drafts(block, max_chars))
             continue
 
         context = (block.structural_path, block.page)

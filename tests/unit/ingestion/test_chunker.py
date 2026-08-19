@@ -88,6 +88,193 @@ def test_class_rule_hierarchy_produces_deterministic_structural_chunks() -> None
     assert first[1].normalized_text.endswith(render_table(table))
 
 
+def test_fitting_table_at_exact_decorated_boundary_stays_whole() -> None:
+    path = ("Synthetic Rules", "Pumps")
+    table = (
+        ("Item", "Requirement"),
+        ("A", "Independent synthetic pump"),
+        ("B", "Emergency synthetic supply"),
+        ("C", "Remote synthetic alarm"),
+    )
+    table_text = render_table(table)
+    max_chars = len("Synthetic Rules > Pumps\n\n") + len(table_text)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=table_text,
+            structural_path=path,
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=max_chars).chunk(VERSION_ID, document)
+
+    assert len(chunks) == 1
+    assert chunks[0].normalized_text.endswith(table_text)
+
+
+def test_oversized_table_uses_largest_consecutive_row_groups() -> None:
+    header = ("Item", "Requirement")
+    row_a = ("A", "Independent synthetic pump")
+    row_b = ("B", "Emergency synthetic supply")
+    row_c = ("C", "Remote synthetic alarm")
+    table = (header, row_a, row_b, row_c)
+    two_row_budget = len(render_table((header, row_a, row_b)))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=two_row_budget).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        render_table((header, row_a, row_b)),
+        render_table((header, row_c)),
+    ]
+
+
+def test_single_oversized_data_row_uses_bounded_text_fallback() -> None:
+    header = ("Code", "Requirement")
+    row = ("A", "abcdefghijklmnopqrstuvwxyz")
+    table = (header, row)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=20).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "A",
+        "abcdefghijklmnopqrst",
+        "uvwxyz",
+    ]
+    assert all(chunk.normalized_text for chunk in chunks)
+    assert all(len(chunk.normalized_text) <= 20 for chunk in chunks)
+
+
+def test_oversized_table_header_uses_generic_canonical_tsv_fallback() -> None:
+    table = (("ABCDEFGHIJK", "Column"), ("A", "value"))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    first = StructuralChunker(max_chars=7).chunk(VERSION_ID, document)
+    second = StructuralChunker(max_chars=7).chunk(VERSION_ID, document)
+
+    assert first == second
+    assert [chunk.normalized_text for chunk in first] == [
+        "ABCDEFG",
+        "HIJK",
+        "Column",
+        "A\tvalue",
+    ]
+    assert all(chunk.normalized_text for chunk in first)
+    assert all(len(chunk.normalized_text) <= 7 for chunk in first)
+
+
+def test_one_row_table_stays_whole_or_splits_deterministically_at_boundary() -> None:
+    table = (("HeaderValue",),)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    fitting = StructuralChunker(max_chars=11).chunk(VERSION_ID, document)
+    oversized = StructuralChunker(max_chars=5).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in fitting] == ["HeaderValue"]
+    assert [chunk.normalized_text for chunk in oversized] == [
+        "Heade",
+        "rValu",
+        "e",
+    ]
+
+
+def test_tables_never_merge_with_paragraphs_or_neighboring_tables() -> None:
+    first_table = (("Header",), ("A",))
+    second_table = (("Header",), ("B",))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="before",
+        ),
+        ParsedBlock(
+            ordinal=1,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(first_table),
+            table=first_table,
+        ),
+        ParsedBlock(
+            ordinal=2,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(second_table),
+            table=second_table,
+        ),
+        ParsedBlock(
+            ordinal=3,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="after",
+        ),
+    )
+
+    chunks = StructuralChunker().chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "before",
+        "Header\nA",
+        "Header\nB",
+        "after",
+    ]
+
+
+def test_table_fragments_preserve_prefix_path_leaf_section_and_page() -> None:
+    path = ("Rules",)
+    table = (("H",), ("alpha",), ("bravo",))
+    block = ParsedBlock(
+        ordinal=0,
+        kind=ParsedBlockKind.TABLE,
+        text=render_table(table),
+        structural_path=path,
+        table=table,
+    )
+    # TABLE pages are not emitted by current Task 10 adapters. Injecting the
+    # already-validated metadata keeps this test local to Task 3 preservation.
+    object.__setattr__(block, "page", 4)
+    document = _document(block)
+
+    chunks = StructuralChunker(max_chars=12).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "Rules\n\nalpha",
+        "Rules\n\nbravo",
+    ]
+    assert all(chunk.structural_path == path for chunk in chunks)
+    assert all(chunk.section == "Rules" for chunk in chunks)
+    assert all(chunk.page == 4 for chunk in chunks)
+    assert all(chunk.normalized_text for chunk in chunks)
+    assert all(len(chunk.normalized_text) <= 12 for chunk in chunks)
+
+
 def test_different_version_id_changes_identity_without_changing_chunk_content() -> None:
     document = ParsedDocument(
         format=DocumentFormat.PDF,
