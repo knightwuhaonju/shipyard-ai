@@ -51,62 +51,73 @@ def test_ingestion_public_surface_exports_chunker_without_regressions() -> None:
     assert ingestion.StructuralChunker is StructuralChunker
 
 
-def test_chunker_imports_remain_inside_the_pure_service_boundary() -> None:
-    source_path = Path("services/ingestion/chunker.py")
-    tree = ast.parse(
-        source_path.read_text(encoding="utf-8"), filename=str(source_path)
-    )
-    allowed_import_roots = {"dataclasses", "packages", "services", "uuid"}
-    denied_import_prefixes = {
-        "adapters.ocr",
-        "anthropic",
-        "cohere",
-        "docx",
-        "google.generativeai",
-        "httpx",
-        "mistralai",
-        "openai",
-        "openpyxl",
-        "os",
-        "pathlib",
-        "pypdf",
-        "requests",
-        "services.retrieval",
-        "socket",
-        "sqlalchemy",
-        "subprocess",
-        "tiktoken",
-        "transformers",
-        "urllib",
+def _assert_chunker_imports_are_pure(
+    source: str, *, filename: str = "<chunker>"
+) -> None:
+    tree = ast.parse(source, filename=filename)
+    allowed_modules = {
+        "__future__",
+        "dataclasses",
+        "packages.domain",
+        "services.ingestion.parser",
+        "uuid",
+    }
+    allowed_targets = {
+        "__future__.annotations",
+        "dataclasses.dataclass",
+        "packages.domain.DocumentChunk",
+        "packages.domain.document_chunk_id",
+        "services.ingestion.parser.ParsedBlock",
+        "services.ingestion.parser.ParsedBlockKind",
+        "services.ingestion.parser.ParsedDocument",
+        "uuid.UUID",
     }
     imported_modules: set[str] = set()
-    imported_symbols: set[str] = set()
-    non_relative_roots: set[str] = set()
+    imported_targets: set[str] = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for name in node.names:
                 imported_modules.add(name.name)
-                non_relative_roots.add(name.name.split(".", maxsplit=1)[0])
-        elif (
-            isinstance(node, ast.ImportFrom)
-            and node.level == 0
-            and node.module != "__future__"
-            and node.module is not None
-        ):
+                imported_targets.add(name.name)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0
+            assert node.module is not None
             imported_modules.add(node.module)
-            imported_symbols.update(name.name for name in node.names)
-            non_relative_roots.add(node.module.split(".", maxsplit=1)[0])
+            imported_targets.update(
+                f"{node.module}.{name.name}" for name in node.names
+            )
 
-    assert non_relative_roots <= allowed_import_roots
-    assert not any(
-        module == prefix or module.startswith(f"{prefix}.")
-        for module in imported_modules
-        for prefix in denied_import_prefixes
+    assert imported_modules <= allowed_modules
+    assert imported_targets <= allowed_targets
+
+
+def test_chunker_imports_remain_inside_the_pure_service_boundary() -> None:
+    source_path = Path("services/ingestion/chunker.py")
+
+    _assert_chunker_imports_are_pure(
+        source_path.read_text(encoding="utf-8"), filename=str(source_path)
     )
-    assert not any("repository" in module.lower() for module in imported_modules)
-    assert "DocumentStore" not in imported_symbols
-    assert not any("repository" in symbol.lower() for symbol in imported_symbols)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from .document_store import DocumentStore",
+        "from ..retrieval import search",
+        "from services import retrieval as r",
+        "from services.ingestion import document_store as store",
+    ],
+    ids=[
+        "relative-document-store",
+        "parent-relative-retrieval",
+        "services-alias-retrieval",
+        "ingestion-alias-document-store",
+    ],
+)
+def test_chunker_import_guard_rejects_dependency_bypass_syntax(source: str) -> None:
+    with pytest.raises(AssertionError):
+        _assert_chunker_imports_are_pure(source)
 
 
 def _document(*blocks: ParsedBlock) -> ParsedDocument:
