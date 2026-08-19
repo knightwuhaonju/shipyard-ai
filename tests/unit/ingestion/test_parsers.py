@@ -3,6 +3,7 @@
 import ast
 import socket
 import struct
+import sys
 import traceback
 import warnings
 from collections.abc import Callable, Iterator
@@ -23,6 +24,7 @@ from adapters.parsers import (
     TxtParser,
     XlsxParser,
 )
+from adapters.parsers import _common as parser_common
 from adapters.parsers._common import validate_ooxml_archive
 from services.ingestion import (
     DocumentFormat,
@@ -251,6 +253,28 @@ def test_parser_contract_builds_one_immutable_common_document() -> None:
     assert parsed.blocks == (block,)
     with pytest.raises(FrozenInstanceError):
         block.text = "changed"  # type: ignore[misc]
+
+
+def test_normalize_block_text_scans_lines_without_full_split_container() -> None:
+    split_calls: list[str] = []
+
+    def observe_calls(
+        _frame: object, event: str, function: object
+    ) -> None:
+        if event == "c_call" and getattr(function, "__name__", None) in {
+            "split",
+            "splitlines",
+        }:
+            split_calls.append(str(getattr(function, "__name__")))
+
+    sys.setprofile(observe_calls)
+    try:
+        normalized = normalize_block_text("  船尾  \r\n泵组\t \r材料\u3000")
+    finally:
+        sys.setprofile(None)
+
+    assert normalized == "船尾\n泵组\n材料"
+    assert split_calls == []
 
 
 def test_parser_adapters_respect_architecture_and_common_surface() -> None:
@@ -1459,49 +1483,144 @@ def test_txt_parser_rejects_oversized_block_with_safe_typed_error(
     _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
 
 
-def test_txt_parser_stops_consuming_paragraphs_at_block_limit(
+def test_txt_parser_real_cursor_stops_at_block_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    paragraphs = _ExplodingSequence(
-        ("first", "second"), "TXT consumed content after exceeding the block limit"
-    )
-    monkeypatch.setattr(
-        "adapters.parsers.text._paragraphs",
-        lambda _text: paragraphs,
-        raising=False,
-    )
+    cursor = parser_common.LineCursor("first\n\nsecond\nnot-read")
     monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
 
     with pytest.raises(ParserError) as raised:
-        TxtParser().parse(b"synthetic")
+        TxtParser()._parse_lines(cursor)
 
     _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 3
 
 
-def test_markdown_parser_stops_parsing_lines_at_block_limit(
+@pytest.mark.parametrize("limit", ["MAX_BLOCK_CHARS", "MAX_TOTAL_TEXT_CHARS"])
+def test_txt_parser_real_cursor_stops_at_character_limit(
+    limit: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import adapters.parsers.markdown as markdown_module
+    cursor = parser_common.LineCursor("12345\nnext\nnot-read")
+    monkeypatch.setattr(parser_contract, limit, 5)
 
-    original = markdown_module._atx_heading
-    calls = 0
+    with pytest.raises(ParserError) as raised:
+        TxtParser()._parse_lines(cursor)
 
-    def observed_heading(line: str) -> tuple[int, str] | None:
-        nonlocal calls
-        calls += 1
-        if calls > 2:
-            raise AssertionError(
-                "Markdown parsed content after exceeding the block limit"
-            )
-        return original(line)
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 2
 
-    monkeypatch.setattr(markdown_module, "_atx_heading", observed_heading)
+
+def test_txt_parser_accepts_exact_output_limits_with_real_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor("12345")
+    monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
+    monkeypatch.setattr(parser_contract, "MAX_BLOCK_CHARS", 5)
+    monkeypatch.setattr(parser_contract, "MAX_TOTAL_TEXT_CHARS", 5)
+
+    parsed = TxtParser()._parse_lines(cursor)
+
+    assert parsed.blocks[0].text == "12345"
+    assert cursor.lines_read == 1
+
+
+def test_txt_parser_stops_after_exact_total_across_paragraphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor("ab\n\ncd\n\nnot-read\nlater")
+    monkeypatch.setattr(parser_contract, "MAX_TOTAL_TEXT_CHARS", 4)
+
+    with pytest.raises(ParserError) as raised:
+        TxtParser()._parse_lines(cursor)
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 5
+
+    exact_cursor = parser_common.LineCursor("ab\n\ncd")
+    parsed = TxtParser()._parse_lines(exact_cursor)
+    assert [block.text for block in parsed.blocks] == ["ab", "cd"]
+    assert exact_cursor.lines_read == 3
+
+
+def test_markdown_parser_real_cursor_stops_at_block_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor("# first\n# second\n# not-read")
     monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
 
     with pytest.raises(ParserError) as raised:
-        MarkdownParser().parse(b"# first\n# second\n# third")
+        MarkdownParser()._parse_lines(cursor)
 
     _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 2
+
+
+@pytest.mark.parametrize("limit", ["MAX_BLOCK_CHARS", "MAX_TOTAL_TEXT_CHARS"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "12345\nnext\nnot-read",
+        "```\nnext\nnot-read",
+        "<div>\nnext\nnot-read",
+    ],
+    ids=["paragraph", "fence", "raw-html"],
+)
+def test_markdown_parser_checks_paragraph_budget_per_line(
+    source: str,
+    limit: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor(source)
+    monkeypatch.setattr(parser_contract, limit, 5)
+
+    with pytest.raises(ParserError) as raised:
+        MarkdownParser()._parse_lines(cursor)
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("12345", "12345"),
+        ("```\nx\n```", "```\nx\n```"),
+        ("<div>\nx\n</div>", "<div>\nx\n</div>"),
+    ],
+    ids=["paragraph", "fence", "raw-html"],
+)
+def test_markdown_parser_accepts_exact_paragraph_character_limits(
+    source: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor(source)
+    monkeypatch.setattr(parser_contract, "MAX_BLOCK_CHARS", len(expected))
+    monkeypatch.setattr(parser_contract, "MAX_TOTAL_TEXT_CHARS", len(expected))
+
+    parsed = MarkdownParser()._parse_lines(cursor)
+
+    assert parsed.blocks[0].text == expected
+    assert cursor.lines_read == source.count("\n") + 1
+
+
+def test_markdown_parser_stops_after_exact_remaining_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cursor = parser_common.LineCursor("# h\nabc\nnot-read\nlater")
+    monkeypatch.setattr(parser_contract, "MAX_TOTAL_TEXT_CHARS", 4)
+
+    with pytest.raises(ParserError) as raised:
+        MarkdownParser()._parse_lines(cursor)
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert cursor.lines_read == 3
+
+    exact_cursor = parser_common.LineCursor("# h\nabc")
+    parsed = MarkdownParser()._parse_lines(exact_cursor)
+    assert [block.text for block in parsed.blocks] == ["h", "abc"]
+    assert exact_cursor.lines_read == 2
 
 
 def test_docx_parser_stops_consuming_body_items_at_block_limit(

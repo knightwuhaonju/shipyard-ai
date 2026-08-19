@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterator
-
 from services.ingestion import (
     DocumentFormat,
     ParsedBlockKind,
@@ -15,7 +12,7 @@ from services.ingestion import (
     validate_source_bytes,
 )
 
-from ._common import BlockAccumulator
+from ._common import BlockAccumulator, LineCursor
 
 
 class TxtParser:
@@ -35,20 +32,23 @@ class TxtParser:
             raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
 
         try:
-            blocks = BlockAccumulator(self.format)
-            for paragraph in _paragraphs(normalized):
-                blocks.append(ParsedBlockKind.PARAGRAPH, paragraph)
-            return blocks.document()
+            return self._parse_lines(LineCursor(normalized))
         except ValueError as error:
             raise _contract_error(error) from None
 
-
-def _paragraphs(text: str) -> Iterator[str]:
-    start = 0
-    for separator in re.finditer(r"\n\n+", text):
-        yield text[start : separator.start()]
-        start = separator.end()
-    yield text[start:]
+    def _parse_lines(self, lines: LineCursor) -> ParsedDocument:
+        """Parse a real lazy line cursor into bounded paragraph blocks."""
+        blocks = BlockAccumulator(self.format)
+        paragraph = blocks.text()
+        while (line := lines.pop()) is not None:
+            if line:
+                paragraph.append_line(line)
+                continue
+            paragraph.finish(ParsedBlockKind.PARAGRAPH)
+        paragraph.finish(ParsedBlockKind.PARAGRAPH)
+        if blocks.is_empty:
+            raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
+        return blocks.document()
 
 
 def _decode_text(content: bytes) -> str:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from collections.abc import Iterable
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import PurePosixPath
 from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, LargeZipFile, ZipFile
 
@@ -79,6 +80,10 @@ class BlockAccumulator:
         """Return a bounded collector for one prospective table block."""
         return TableAccumulator(self)
 
+    def text(self) -> LineBlockAccumulator:
+        """Return a bounded line buffer for one prospective text block."""
+        return LineBlockAccumulator(self)
+
     def document(self) -> ParsedDocument:
         """Return the validated immutable document assembled so far."""
         try:
@@ -98,6 +103,95 @@ class BlockAccumulator:
         ):
             raise ParserError(ParserErrorCode.RESOURCE_LIMIT)
 
+
+class LineCursor:
+    """Read normalized text lazily with at most two buffered lines."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._offset = 0
+        self._finished = not text
+        self._buffer: deque[str] = deque()
+        self._lines_read = 0
+
+    @property
+    def lines_read(self) -> int:
+        """Return the number of source lines materialized so far."""
+        return self._lines_read
+
+    def peek(self, offset: int = 0) -> str | None:
+        """Return the current or next line without consuming it."""
+        if offset not in {0, 1}:
+            raise ValueError("line cursor supports at most two-line lookahead")
+        self._fill(offset + 1)
+        if offset >= len(self._buffer):
+            return None
+        return self._buffer[offset]
+
+    def pop(self) -> str | None:
+        """Consume and return the current line, or None at end of input."""
+        self._fill(1)
+        if not self._buffer:
+            return None
+        return self._buffer.popleft()
+
+    def _fill(self, count: int) -> None:
+        while len(self._buffer) < count and not self._finished:
+            newline = self._text.find("\n", self._offset)
+            if newline < 0:
+                line = self._text[self._offset :]
+                self._finished = True
+            else:
+                line = self._text[self._offset : newline]
+                self._offset = newline + 1
+            self._buffer.append(line)
+            self._lines_read += 1
+
+
+class LineBlockAccumulator:
+    """Build one multiline block while enforcing its final text budget."""
+
+    def __init__(self, blocks: BlockAccumulator) -> None:
+        self._blocks = blocks
+        self._stream = StringIO()
+        self._line_count = 0
+        self._character_count = 0
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether this prospective block contains no lines."""
+        return self._line_count == 0
+
+    def append_line(self, line: str) -> None:
+        """Append one line only after its final separator budget is safe."""
+        separator_chars = int(self._line_count > 0)
+        prospective_chars = self._character_count + separator_chars + len(line)
+        if self._line_count == 0:
+            self._blocks._check_block_capacity()
+        self._blocks._check_text_budget(prospective_chars)
+        if separator_chars:
+            self._stream.write("\n")
+        self._stream.write(line)
+        self._line_count += 1
+        self._character_count = prospective_chars
+
+    def finish(
+        self,
+        kind: ParsedBlockKind,
+        *,
+        structural_path: tuple[str, ...] = (),
+    ) -> None:
+        """Append the completed block and reset this buffer for reuse."""
+        if self.is_empty:
+            return
+        self._blocks.append(
+            kind,
+            self._stream.getvalue(),
+            structural_path=structural_path,
+        )
+        self._stream = StringIO()
+        self._line_count = 0
+        self._character_count = 0
 
 class TableAccumulator:
     """Collect normalized cells under table and output-character limits."""

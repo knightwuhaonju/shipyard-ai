@@ -88,7 +88,7 @@ def normalize_block_text(text: str) -> str:
     """Normalize line endings and surrounding block whitespace safely."""
     _require_text(text, "text")
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    return "\n".join(line.rstrip() for line in normalized.split("\n")).strip()
+    return re.sub(r"[^\S\n]+(?=\n|$)", "", normalized).strip()
 
 
 def normalize_table_cell(cell: str) -> str:

@@ -17,7 +17,7 @@ from services.ingestion import (
     validate_source_bytes,
 )
 
-from ._common import BlockAccumulator, TableAccumulator
+from ._common import BlockAccumulator, LineCursor, TableAccumulator
 
 _ATX_HEADING = re.compile(r"^(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
 _SETEXT_HEADING = re.compile(r"^[ \t]*(?:=+|-+)[ \t]*$")
@@ -102,18 +102,17 @@ class MarkdownParser:
             raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
 
         try:
-            return self._parse_normalized(normalized)
+            return self._parse_lines(LineCursor(normalized))
         except ValueError as error:
             raise _contract_error(error) from None
 
-    def _parse_normalized(self, text: str) -> ParsedDocument:
-        lines = text.split("\n")
+    def _parse_lines(self, lines: LineCursor) -> ParsedDocument:
+        """Parse through a bounded two-line-lookahead cursor."""
         blocks = BlockAccumulator(self.format)
-        paragraph_lines: list[str] = []
+        paragraph = blocks.text()
         headings: list[str] = []
         fence: str | None = None
         raw_html_tag: str | None = None
-        index = 0
 
         def append_block(
             kind: ParsedBlockKind,
@@ -129,77 +128,85 @@ class MarkdownParser:
             )
 
         def flush_paragraph() -> None:
-            if paragraph_lines:
-                append_block(ParsedBlockKind.PARAGRAPH, "\n".join(paragraph_lines))
-                paragraph_lines.clear()
+            paragraph.finish(
+                ParsedBlockKind.PARAGRAPH,
+                structural_path=tuple(headings),
+            )
 
-        while index < len(lines):
-            line = lines[index]
+        while (line := lines.peek()) is not None:
             if fence is not None:
-                paragraph_lines.append(line)
+                lines.pop()
+                paragraph.append_line(line)
                 if _is_closing_fence(line, fence):
                     fence = None
-                index += 1
                 continue
 
             if raw_html_tag is not None:
-                paragraph_lines.append(line)
+                lines.pop()
+                paragraph.append_line(line)
                 if _contains_html_close(line, raw_html_tag):
                     raw_html_tag = None
-                index += 1
                 continue
 
             opening_fence = _opening_fence(line)
             if opening_fence is not None:
-                paragraph_lines.append(line)
+                lines.pop()
+                paragraph.append_line(line)
                 fence = opening_fence
-                index += 1
                 continue
 
             opening_html = _opening_html_tag(line)
             if opening_html is not None:
-                paragraph_lines.append(line)
+                lines.pop()
+                paragraph.append_line(line)
                 raw_html_tag = opening_html
-                index += 1
                 continue
 
             if not line.strip():
+                lines.pop()
                 flush_paragraph()
-                index += 1
                 continue
 
             atx_heading = _atx_heading(line)
             if atx_heading is not None:
+                lines.pop()
                 level, heading = atx_heading
                 flush_paragraph()
                 _replace_heading(headings, level, heading)
                 append_block(ParsedBlockKind.HEADING, heading)
-                index += 1
                 continue
 
-            if not paragraph_lines and index + 1 < len(lines):
-                setext_level = _setext_level(lines[index + 1])
+            if paragraph.is_empty:
+                next_line = lines.peek(1)
+                setext_level = (
+                    _setext_level(next_line) if next_line is not None else None
+                )
                 if setext_level is not None:
+                    lines.pop()
+                    lines.pop()
                     heading = normalize_block_text(line)
                     if heading:
                         _replace_heading(headings, setext_level, heading)
                         append_block(ParsedBlockKind.HEADING, heading)
-                        index += 2
                         continue
 
-            if index + 1 < len(lines) and _is_table_header(line, lines[index + 1]):
-                flush_paragraph()
-                table_result, index = _consume_table(lines, index, blocks.table())
-                if table_result is None:
-                    raise ValueError("Markdown table must contain content")
-                table, table_text = table_result
-                append_block(ParsedBlockKind.TABLE, table_text, table=table)
-                continue
+            if "|" in line:
+                next_line = lines.peek(1)
+                if next_line is not None and _is_table_header(line, next_line):
+                    flush_paragraph()
+                    table_result = _consume_table(lines, blocks.table())
+                    if table_result is None:
+                        raise ValueError("Markdown table must contain content")
+                    table, table_text = table_result
+                    append_block(ParsedBlockKind.TABLE, table_text, table=table)
+                    continue
 
-            paragraph_lines.append(line)
-            index += 1
+            lines.pop()
+            paragraph.append_line(line)
 
         flush_paragraph()
+        if blocks.is_empty:
+            raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
         return blocks.document()
 
 
@@ -278,24 +285,27 @@ def _is_table_header(header: str, delimiter: str) -> bool:
 
 
 def _consume_table(
-    lines: list[str], index: int, table: TableAccumulator
-) -> tuple[tuple[TableCells, str] | None, int]:
-    header = _pipe_cells(lines[index])
+    lines: LineCursor, table: TableAccumulator
+) -> tuple[TableCells, str] | None:
+    header_line = lines.pop()
+    delimiter_line = lines.pop()
+    if header_line is None or delimiter_line is None:
+        raise ValueError("incomplete Markdown table header")
+    header = _pipe_cells(header_line)
     if header is None:
         raise ValueError("invalid Markdown table header")
     _validate_column_count(header)
     table.append_row(header)
-    index += 2
-    while index < len(lines):
-        row = _pipe_cells(lines[index])
+    while (line := lines.peek()) is not None:
+        row = _pipe_cells(line)
         if row is None:
             break
+        lines.pop()
         _validate_column_count(row)
         if len(row) > len(header):
             raise ValueError("Markdown table row exceeds header width")
         table.append_row((*row, *([""] * (len(header) - len(row)))))
-        index += 1
-    return table.finish(), index
+    return table.finish()
 
 
 def _pipe_cells(line: str) -> list[str] | None:
