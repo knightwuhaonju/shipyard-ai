@@ -118,7 +118,7 @@ def test_alias_migration_is_current_head(migrated_engine: Engine) -> None:
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "20260818_0002"
+            == "20260819_0003"
         )
 
 

@@ -7,6 +7,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 
+from infra.postgres import document_models as _document_models  # noqa: F401
 from infra.postgres.models import Base
 
 config = context.config
