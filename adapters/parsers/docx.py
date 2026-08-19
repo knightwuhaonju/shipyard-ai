@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from io import BytesIO
+from typing import Any
 from zipfile import BadZipFile, LargeZipFile
 
 from docx import Document
@@ -15,19 +16,16 @@ from lxml.etree import XMLSyntaxError  # type: ignore[import-untyped]
 
 from services.ingestion import (
     DocumentFormat,
-    ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
     ParserError,
     ParserErrorCode,
     TableCells,
     normalize_block_text,
-    normalize_table_cell,
-    render_table,
     validate_source_bytes,
 )
 
-from ._common import validate_ooxml_archive
+from ._common import BlockAccumulator, TableAccumulator, validate_ooxml_archive
 
 _HEADING_STYLE = re.compile(r"^Heading ([1-9])$")
 _RESOURCE_LIMIT_ERRORS = frozenset(
@@ -57,25 +55,25 @@ class DocxParser:
         try:
             document = Document(BytesIO(content))
             blocks = _document_blocks(document.iter_inner_content())
-            if not blocks:
+            if blocks.is_empty:
                 raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
-            return ParsedDocument(format=self.format, blocks=tuple(blocks))
+            return blocks.document()
         except ParserError:
             raise
         except ValueError as error:
-            raise _contract_error(error) from error
+            raise _contract_error(error) from None
         except (
             BadZipFile,
             KeyError,
             LargeZipFile,
             OpcError,
             XMLSyntaxError,
-        ) as error:
-            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from error
+        ):
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from None
 
 
-def _document_blocks(content: Iterable[Paragraph | Table]) -> list[ParsedBlock]:
-    blocks: list[ParsedBlock] = []
+def _document_blocks(content: Iterable[Paragraph | Table]) -> BlockAccumulator:
+    blocks = BlockAccumulator(DocumentFormat.DOCX)
     title: str | None = None
     headings: list[tuple[int, str]] = []
 
@@ -97,28 +95,22 @@ def _document_blocks(content: Iterable[Paragraph | Table]) -> list[ParsedBlock]:
                 else:
                     kind = ParsedBlockKind.PARAGRAPH
             blocks.append(
-                ParsedBlock(
-                    ordinal=len(blocks),
-                    kind=kind,
-                    text=text,
-                    structural_path=_structural_path(title, headings),
-                )
+                kind,
+                text,
+                structural_path=_structural_path(title, headings),
             )
             continue
 
         if isinstance(item, Table):
-            table = _table_cells(item)
+            table = _table_cells(item, blocks.table())
             if table is None:
                 continue
             cells, text = table
             blocks.append(
-                ParsedBlock(
-                    ordinal=len(blocks),
-                    kind=ParsedBlockKind.TABLE,
-                    text=text,
-                    structural_path=_structural_path(title, headings),
-                    table=cells,
-                )
+                ParsedBlockKind.TABLE,
+                text,
+                structural_path=_structural_path(title, headings),
+                table=cells,
             )
 
     return blocks
@@ -137,29 +129,26 @@ def _structural_path(
     return root + tuple(text for _, text in headings)
 
 
-def _table_cells(table: Table) -> tuple[TableCells, str] | None:
-    rows: list[list[str]] = []
-    width = 0
+def _table_cells(
+    table: Table, cells: TableAccumulator
+) -> tuple[TableCells, str] | None:
     for row in table.rows:
-        values = [""] * row.grid_cols_before
-        seen_cells: list[object] = []
-        for cell in row.cells:
-            if any(cell is seen for seen in seen_cells):
-                values.append("")
-            else:
-                seen_cells.append(cell)
-                values.append(normalize_table_cell(cell.text))
-        values.extend([""] * row.grid_cols_after)
-        width = max(width, len(values))
-        rows.append(values)
+        cells.append_row(_docx_row_cells(row))
+    return cells.finish()
 
-    if width == 0 or not any(cell for row in rows for cell in row):
-        return None
 
-    rectangular = tuple(tuple(row + [""] * (width - len(row))) for row in rows)
-    text = render_table(rectangular)
-    canonical = tuple(tuple(line.split("\t")) for line in text.split("\n"))
-    return canonical, text
+def _docx_row_cells(row: Any) -> Iterable[str]:
+    for _ in range(row.grid_cols_before):
+        yield ""
+    seen_cells: list[object] = []
+    for cell in row.cells:
+        if any(cell is seen for seen in seen_cells):
+            yield ""
+        else:
+            seen_cells.append(cell)
+            yield cell.text
+    for _ in range(row.grid_cols_after):
+        yield ""
 
 
 def _contract_error(error: ValueError) -> ParserError:

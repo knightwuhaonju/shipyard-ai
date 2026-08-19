@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 from services.ingestion import (
     DocumentFormat,
-    ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
     ParserError,
@@ -14,6 +14,8 @@ from services.ingestion import (
     normalize_block_text,
     validate_source_bytes,
 )
+
+from ._common import BlockAccumulator
 
 
 class TxtParser:
@@ -33,24 +35,27 @@ class TxtParser:
             raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
 
         try:
-            blocks = tuple(
-                ParsedBlock(
-                    ordinal=ordinal,
-                    kind=ParsedBlockKind.PARAGRAPH,
-                    text=paragraph,
-                )
-                for ordinal, paragraph in enumerate(re.split(r"\n\n+", normalized))
-            )
-            return ParsedDocument(format=self.format, blocks=blocks)
+            blocks = BlockAccumulator(self.format)
+            for paragraph in _paragraphs(normalized):
+                blocks.append(ParsedBlockKind.PARAGRAPH, paragraph)
+            return blocks.document()
         except ValueError as error:
-            raise _contract_error(error) from error
+            raise _contract_error(error) from None
+
+
+def _paragraphs(text: str) -> Iterator[str]:
+    start = 0
+    for separator in re.finditer(r"\n\n+", text):
+        yield text[start : separator.start()]
+        start = separator.end()
+    yield text[start:]
 
 
 def _decode_text(content: bytes) -> str:
     try:
         text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as error:
-        raise ParserError(ParserErrorCode.UNSUPPORTED_ENCODING) from error
+    except UnicodeDecodeError:
+        raise ParserError(ParserErrorCode.UNSUPPORTED_ENCODING) from None
     if "\x00" in text:
         raise ParserError(ParserErrorCode.INVALID_DOCUMENT)
     return text

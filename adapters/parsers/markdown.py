@@ -7,7 +7,6 @@ import re
 import services.ingestion.parser as parser_contract
 from services.ingestion import (
     DocumentFormat,
-    ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
     ParserError,
@@ -15,9 +14,10 @@ from services.ingestion import (
     TableCells,
     normalize_block_text,
     normalize_table_cell,
-    render_table,
     validate_source_bytes,
 )
+
+from ._common import BlockAccumulator, TableAccumulator
 
 _ATX_HEADING = re.compile(r"^(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
 _SETEXT_HEADING = re.compile(r"^[ \t]*(?:=+|-+)[ \t]*$")
@@ -104,11 +104,11 @@ class MarkdownParser:
         try:
             return self._parse_normalized(normalized)
         except ValueError as error:
-            raise _contract_error(error) from error
+            raise _contract_error(error) from None
 
     def _parse_normalized(self, text: str) -> ParsedDocument:
         lines = text.split("\n")
-        blocks: list[ParsedBlock] = []
+        blocks = BlockAccumulator(self.format)
         paragraph_lines: list[str] = []
         headings: list[str] = []
         fence: str | None = None
@@ -122,13 +122,10 @@ class MarkdownParser:
             table: TableCells | None = None,
         ) -> None:
             blocks.append(
-                ParsedBlock(
-                    ordinal=len(blocks),
-                    kind=kind,
-                    text=block_text,
-                    structural_path=tuple(headings),
-                    table=table,
-                )
+                kind,
+                block_text,
+                structural_path=tuple(headings),
+                table=table,
             )
 
         def flush_paragraph() -> None:
@@ -192,22 +189,25 @@ class MarkdownParser:
 
             if index + 1 < len(lines) and _is_table_header(line, lines[index + 1]):
                 flush_paragraph()
-                table, index = _consume_table(lines, index)
-                append_block(ParsedBlockKind.TABLE, render_table(table), table=table)
+                table_result, index = _consume_table(lines, index, blocks.table())
+                if table_result is None:
+                    raise ValueError("Markdown table must contain content")
+                table, table_text = table_result
+                append_block(ParsedBlockKind.TABLE, table_text, table=table)
                 continue
 
             paragraph_lines.append(line)
             index += 1
 
         flush_paragraph()
-        return ParsedDocument(format=self.format, blocks=tuple(blocks))
+        return blocks.document()
 
 
 def _decode_text(content: bytes) -> str:
     try:
         text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as error:
-        raise ParserError(ParserErrorCode.UNSUPPORTED_ENCODING) from error
+    except UnicodeDecodeError:
+        raise ParserError(ParserErrorCode.UNSUPPORTED_ENCODING) from None
     if "\x00" in text:
         raise ParserError(ParserErrorCode.INVALID_DOCUMENT)
     return text
@@ -270,16 +270,21 @@ def _is_table_header(header: str, delimiter: str) -> bool:
         and delimiter_cells is not None
         and len(header_cells) == len(delimiter_cells)
         and bool(header_cells)
-        and all(_TABLE_DELIMITER_CELL.fullmatch(cell) for cell in delimiter_cells)
+        and all(
+            _TABLE_DELIMITER_CELL.fullmatch(normalize_table_cell(cell))
+            for cell in delimiter_cells
+        )
     )
 
 
-def _consume_table(lines: list[str], index: int) -> tuple[TableCells, int]:
+def _consume_table(
+    lines: list[str], index: int, table: TableAccumulator
+) -> tuple[tuple[TableCells, str] | None, int]:
     header = _pipe_cells(lines[index])
     if header is None:
         raise ValueError("invalid Markdown table header")
     _validate_column_count(header)
-    rows: list[tuple[str, ...]] = [tuple(header)]
+    table.append_row(header)
     index += 2
     while index < len(lines):
         row = _pipe_cells(lines[index])
@@ -288,9 +293,9 @@ def _consume_table(lines: list[str], index: int) -> tuple[TableCells, int]:
         _validate_column_count(row)
         if len(row) > len(header):
             raise ValueError("Markdown table row exceeds header width")
-        rows.append(tuple(row + [""] * (len(header) - len(row))))
+        table.append_row((*row, *([""] * (len(header) - len(row)))))
         index += 1
-    return tuple(rows), index
+    return table.finish(), index
 
 
 def _pipe_cells(line: str) -> list[str] | None:
@@ -302,7 +307,7 @@ def _pipe_cells(line: str) -> list[str] | None:
         cells = cells[1:]
     if stripped.endswith("|"):
         cells = cells[:-1]
-    return [normalize_table_cell(cell) for cell in cells]
+    return cells
 
 
 def _validate_column_count(cells: list[str]) -> None:

@@ -66,6 +66,8 @@ class ParserError(RuntimeError):
     """A safe public error raised by parser adapters."""
 
     def __init__(self, code: ParserErrorCode) -> None:
+        if type(code) is not ParserErrorCode:
+            raise TypeError("code must be a ParserErrorCode")
         self.code = code
         super().__init__(_ERROR_MESSAGES[code])
 
@@ -125,11 +127,11 @@ class ParsedBlock:
     table: TableCells | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.ordinal, bool) or not isinstance(self.ordinal, int):
+        if type(self.ordinal) is not int:
             raise ValueError("ordinal must be a non-negative integer")
         if self.ordinal < 0:
             raise ValueError("ordinal must be a non-negative integer")
-        if not isinstance(self.kind, ParsedBlockKind):
+        if type(self.kind) is not ParsedBlockKind:
             raise ValueError("kind must be a ParsedBlockKind")
         _require_non_blank_text(self.text, "text")
         _validate_structural_path(self.structural_path)
@@ -166,9 +168,9 @@ class ParsedDocument:
     blocks: tuple[ParsedBlock, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.format, DocumentFormat):
+        if type(self.format) is not DocumentFormat:
             raise ValueError("format must be a DocumentFormat")
-        if not isinstance(self.blocks, tuple):
+        if type(self.blocks) is not tuple:
             raise ValueError("blocks must be a tuple of ParsedBlock")
         if not self.blocks:
             raise ValueError("blocks must not be empty")
@@ -177,7 +179,7 @@ class ParsedDocument:
 
         total_text_chars = 0
         for expected_ordinal, block in enumerate(self.blocks):
-            if not isinstance(block, ParsedBlock):
+            if type(block) is not ParsedBlock:
                 raise ValueError("blocks must be a tuple of ParsedBlock")
             if block.ordinal != expected_ordinal:
                 raise ValueError("blocks must have contiguous ordinals")
@@ -189,7 +191,7 @@ class ParsedDocument:
 
 
 def _require_text(value: str, field: str) -> None:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise ValueError(f"{field} must be a string")
     if "\x00" in value:
         raise ValueError(f"{field} must not contain NUL")
@@ -202,17 +204,17 @@ def _require_non_blank_text(value: str, field: str) -> None:
 
 
 def _validate_structural_path(path: tuple[str, ...]) -> None:
-    if not isinstance(path, tuple):
+    if type(path) is not tuple:
         raise ValueError("structural_path must be a tuple of non-blank strings")
     for value in path:
-        if not isinstance(value, str) or "\x00" in value or not value.strip():
+        if type(value) is not str or "\x00" in value or not value.strip():
             raise ValueError("structural_path must be non-blank")
 
 
 def _validate_page(page: int | None) -> None:
     if page is None:
         return
-    if isinstance(page, bool) or not isinstance(page, int) or page <= 0:
+    if type(page) is not int or page <= 0:
         raise ValueError("page must be a positive integer")
 
 
@@ -223,7 +225,7 @@ def _validate_sheet(sheet: str | None) -> None:
 
 
 def _canonical_table(cells: TableCells) -> TableCells:
-    if not isinstance(cells, tuple) or not cells:
+    if type(cells) is not tuple or not cells:
         raise ValueError("table must be a non-empty rectangular tuple of rows")
     if len(cells) > MAX_TABLE_ROWS:
         raise ValueError("table exceeds maximum row count")
@@ -231,7 +233,7 @@ def _canonical_table(cells: TableCells) -> TableCells:
     rows: list[tuple[str, ...]] = []
     column_count: int | None = None
     for row in cells:
-        if not isinstance(row, tuple) or not row:
+        if type(row) is not tuple or not row:
             raise ValueError("table must be a non-empty rectangular tuple of rows")
         if column_count is None:
             column_count = len(row)

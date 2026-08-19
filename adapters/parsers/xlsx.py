@@ -13,21 +13,17 @@ from openpyxl.utils.exceptions import (  # type: ignore[import-untyped]
     InvalidFileException,
 )
 
-import services.ingestion.parser as parser_contract
 from services.ingestion import (
     DocumentFormat,
-    ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
     ParserError,
     ParserErrorCode,
     TableCells,
-    normalize_table_cell,
-    render_table,
     validate_source_bytes,
 )
 
-from ._common import validate_ooxml_archive
+from ._common import BlockAccumulator, TableAccumulator, validate_ooxml_archive
 
 _RESOURCE_LIMIT_ERRORS = frozenset(
     {
@@ -64,76 +60,50 @@ class XlsxParser:
                 keep_vba=False,
             )
             blocks = _workbook_blocks(workbook)
-            if not blocks:
+            if blocks.is_empty:
                 raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
-            return ParsedDocument(format=self.format, blocks=tuple(blocks))
+            return blocks.document()
         except ParserError:
             raise
         except ValueError as error:
-            raise _contract_error(error) from error
+            raise _contract_error(error) from None
         except (
             BadZipFile,
             InvalidFileException,
             KeyError,
             LargeZipFile,
             XMLSyntaxError,
-        ) as error:
-            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from error
+        ):
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from None
         finally:
             if workbook is not None:
                 workbook.close()
 
 
-def _workbook_blocks(workbook: Any) -> list[ParsedBlock]:
-    blocks: list[ParsedBlock] = []
+def _workbook_blocks(workbook: Any) -> BlockAccumulator:
+    blocks = BlockAccumulator(DocumentFormat.XLSX)
     for worksheet in workbook.worksheets:
-        table = _worksheet_table(worksheet)
+        table = _worksheet_table(worksheet, blocks.table())
         if table is None:
             continue
         cells, text = table
         blocks.append(
-            ParsedBlock(
-                ordinal=len(blocks),
-                kind=ParsedBlockKind.TABLE,
-                text=text,
-                structural_path=(worksheet.title,),
-                sheet=worksheet.title,
-                table=cells,
-            )
+            ParsedBlockKind.TABLE,
+            text,
+            structural_path=(worksheet.title,),
+            sheet=worksheet.title,
+            table=cells,
         )
     return blocks
 
 
-def _worksheet_table(worksheet: Any) -> tuple[TableCells, str] | None:
+def _worksheet_table(
+    worksheet: Any, table: TableAccumulator
+) -> tuple[TableCells, str] | None:
     worksheet.reset_dimensions()
-    rows: list[list[str]] = []
-    row_count = 0
-    maximum_columns = 0
-    scanned_cells = 0
-
     for values in worksheet.iter_rows(values_only=True):
-        row_count += 1
-        column_count = len(values)
-        maximum_columns = max(maximum_columns, column_count)
-        scanned_cells += column_count
-        if (
-            row_count > parser_contract.MAX_TABLE_ROWS
-            or maximum_columns > parser_contract.MAX_TABLE_COLUMNS
-            or scanned_cells > parser_contract.MAX_TABLE_CELLS
-            or row_count * maximum_columns > parser_contract.MAX_TABLE_CELLS
-        ):
-            raise ParserError(ParserErrorCode.RESOURCE_LIMIT)
-        rows.append([_cell_text(value) for value in values])
-
-    if maximum_columns == 0 or not any(cell for row in rows for cell in row):
-        return None
-
-    rectangular = tuple(
-        tuple(row + [""] * (maximum_columns - len(row))) for row in rows
-    )
-    text = render_table(rectangular)
-    canonical = tuple(tuple(line.split("\t")) for line in text.split("\n"))
-    return canonical, text
+        table.append_row(_cell_text(value) for value in values)
+    return table.finish()
 
 
 def _cell_text(value: object) -> str:
@@ -144,9 +114,9 @@ def _cell_text(value: object) -> str:
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, str):
-        return normalize_table_cell(value)
+        return value
     if isinstance(value, (int, float)):
-        return normalize_table_cell(str(value))
+        return str(value)
     raise ValueError("unsupported XLSX cell value")
 
 

@@ -5,12 +5,11 @@ from __future__ import annotations
 from io import BytesIO
 
 from pypdf import PdfReader
-from pypdf.errors import FileNotDecryptedError, PdfReadError
+from pypdf.errors import FileNotDecryptedError, LimitReachedError, PdfReadError
 
 import services.ingestion.parser as parser_contract
 from services.ingestion import (
     DocumentFormat,
-    ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
     ParserError,
@@ -18,6 +17,8 @@ from services.ingestion import (
     normalize_block_text,
     validate_source_bytes,
 )
+
+from ._common import BlockAccumulator
 
 _RESOURCE_LIMIT_ERRORS = frozenset(
     {
@@ -46,7 +47,7 @@ class PdfParser:
             if len(reader.pages) > parser_contract.MAX_PDF_PAGES:
                 raise ParserError(ParserErrorCode.RESOURCE_LIMIT)
 
-            blocks: list[ParsedBlock] = []
+            blocks = BlockAccumulator(self.format)
             for page_number, page in enumerate(reader.pages, start=1):
                 contents = page.get_contents()
                 if contents is not None:
@@ -57,45 +58,26 @@ class PdfParser:
                 text = _normalized_extracted_text(extracted_text)
                 if not text:
                     continue
-                blocks.append(_page_block(len(blocks), page_number, text))
+                blocks.append(ParsedBlockKind.PAGE, text, page=page_number)
 
-            if not blocks:
+            if blocks.is_empty:
                 raise ParserError(ParserErrorCode.OCR_REQUIRED)
-            return _parsed_document(self.format, blocks)
+            return blocks.document()
         except ParserError:
             raise
-        except FileNotDecryptedError as error:
-            raise ParserError(ParserErrorCode.ENCRYPTED_DOCUMENT) from error
-        except PdfReadError as error:
-            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from error
+        except FileNotDecryptedError:
+            raise ParserError(ParserErrorCode.ENCRYPTED_DOCUMENT) from None
+        except LimitReachedError:
+            raise ParserError(ParserErrorCode.RESOURCE_LIMIT) from None
+        except PdfReadError:
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from None
 
 
 def _normalized_extracted_text(text: str) -> str:
     try:
         return normalize_block_text(text)
     except ValueError as error:
-        raise _contract_error(error) from error
-
-
-def _page_block(ordinal: int, page_number: int, text: str) -> ParsedBlock:
-    try:
-        return ParsedBlock(
-            ordinal=ordinal,
-            kind=ParsedBlockKind.PAGE,
-            text=text,
-            page=page_number,
-        )
-    except ValueError as error:
-        raise _contract_error(error) from error
-
-
-def _parsed_document(
-    format_: DocumentFormat, blocks: list[ParsedBlock]
-) -> ParsedDocument:
-    try:
-        return ParsedDocument(format=format_, blocks=tuple(blocks))
-    except ValueError as error:
-        raise _contract_error(error) from error
+        raise _contract_error(error) from None
 
 
 def _contract_error(error: ValueError) -> ParserError:

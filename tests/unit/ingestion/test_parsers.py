@@ -3,15 +3,17 @@
 import ast
 import socket
 import struct
+import traceback
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import FrozenInstanceError
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from unittest.mock import Mock
+from zipfile import ZIP_BZIP2, ZIP_DEFLATED, ZipFile
 
 import pytest
-from pypdf.errors import FileNotDecryptedError, PdfStreamError
+from pypdf.errors import FileNotDecryptedError, LimitReachedError, PdfStreamError
 
 import services.ingestion.parser as parser_contract
 from adapters.parsers import (
@@ -170,6 +172,19 @@ class _WorkbookStub:
         self.closed = True
 
 
+class _ExplodingSequence[T]:
+    def __init__(self, values: tuple[T, ...], message: str) -> None:
+        self._values = values
+        self._message = message
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self) -> Iterator[T]:
+        yield from self._values
+        raise AssertionError(self._message)
+
+
 class _PdfContentsStub:
     def __init__(self, data: bytes | Exception) -> None:
         self._data = data
@@ -209,6 +224,7 @@ def _assert_parser_error(
 ) -> None:
     assert raised.value.code is code
     assert str(raised.value) == _PARSER_ERROR_MESSAGES[code]
+    assert raised.value.__cause__ is None
 
 
 def _paragraph(**changes: object) -> ParsedBlock:
@@ -353,6 +369,93 @@ def test_parser_error_has_typed_code_and_fixed_message(
 
     assert error.code is code
     assert str(error) == message
+
+
+def test_parser_error_rejects_non_exact_error_code() -> None:
+    with pytest.raises(TypeError, match="^code must be a ParserErrorCode$"):
+        ParserError("invalid_document")  # type: ignore[arg-type]
+
+
+class _IntSubclass(int):
+    pass
+
+
+class _StringSubclass(str):
+    pass
+
+
+class _TupleSubclass(tuple[object, ...]):
+    pass
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"ordinal": _IntSubclass(0)},
+        {"kind": Mock(spec=ParsedBlockKind)},
+        {"text": _StringSubclass("Pump installation requirements")},
+        {"structural_path": _TupleSubclass(("Equipment",))},
+        {"structural_path": (_StringSubclass("Equipment"),)},
+        {"page": _IntSubclass(1)},
+        {"sheet": _StringSubclass("Equipment")},
+    ],
+)
+def test_parsed_block_requires_exact_scalar_and_path_types(
+    changes: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        _paragraph(**changes)
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        _TupleSubclass((("item",),)),
+        (_TupleSubclass(("item",)),),
+        ((_StringSubclass("item"),),),
+    ],
+)
+def test_parsed_block_requires_exact_table_container_and_cell_types(
+    table: object,
+) -> None:
+    with pytest.raises(ValueError):
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text="item",
+            table=table,  # type: ignore[arg-type]
+        )
+
+
+class _ParsedBlockSubclass(ParsedBlock):
+    pass
+
+
+@pytest.mark.parametrize("invalid_field", ["format", "blocks", "block"])
+def test_parsed_document_requires_exact_field_and_block_types(
+    invalid_field: str,
+) -> None:
+    block: ParsedBlock = _paragraph()
+    format_: object = DocumentFormat.TXT
+    blocks: object = (block,)
+    if invalid_field == "format":
+        format_ = Mock(spec=DocumentFormat)
+    elif invalid_field == "blocks":
+        blocks = _TupleSubclass((block,))
+    else:
+        blocks = (
+            _ParsedBlockSubclass(
+                ordinal=0,
+                kind=ParsedBlockKind.PARAGRAPH,
+                text="Pump installation requirements",
+            ),
+        )
+
+    with pytest.raises(ValueError):
+        ParsedDocument(
+            format=format_,  # type: ignore[arg-type]
+            blocks=blocks,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("ordinal", [True, -1, 1.5, "0"])
@@ -610,6 +713,33 @@ def test_ooxml_preflight_rejects_declared_compression_ratio_over_limit() -> None
         validate_ooxml_archive(content)
 
     _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+@pytest.mark.parametrize(
+    ("parser", "library_target"),
+    [
+        (DocxParser(), "adapters.parsers.docx.Document"),
+        (XlsxParser(), "openpyxl.load_workbook"),
+    ],
+)
+def test_ooxml_preflight_rejects_unsupported_compression_before_library_parse(
+    parser: Parser,
+    library_target: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = BytesIO()
+    with ZipFile(output, "w", compression=ZIP_BZIP2) as archive:
+        archive.writestr("[Content_Types].xml", b"synthetic")
+
+    def fail_library(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("format library received unsupported ZIP compression")
+
+    monkeypatch.setattr(library_target, fail_library)
+
+    with pytest.raises(ParserError) as raised:
+        parser.parse(output.getvalue())
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
 
 
 def test_docx_parser_translates_malformed_package_to_safe_typed_error() -> None:
@@ -1032,6 +1162,10 @@ def test_pdf_parser_translates_output_character_limits(
             FileNotDecryptedError("sensitive encryption details"),
             ParserErrorCode.ENCRYPTED_DOCUMENT,
         ),
+        (
+            LimitReachedError("sensitive resource details"),
+            ParserErrorCode.RESOURCE_LIMIT,
+        ),
     ],
 )
 def test_pdf_parser_translates_expected_pypdf_errors_without_leaking_details(
@@ -1048,6 +1182,12 @@ def test_pdf_parser_translates_expected_pypdf_errors_without_leaking_details(
         PdfParser().parse(synthetic_pdf_bytes())
 
     _assert_parser_error(raised, code)
+    formatted = "".join(
+        traceback.format_exception(
+            type(raised.value), raised.value, raised.value.__traceback__
+        )
+    )
+    assert str(error) not in formatted
 
 
 def test_pdf_parser_does_not_swallow_unexpected_extraction_value_error(
@@ -1096,6 +1236,7 @@ def test_pdf_adapter_imports_no_ocr_rendering_model_or_io_subsystems() -> None:
 
     assert imports <= {
         "__future__",
+        "_common",
         "io",
         "pypdf",
         "pypdf.errors",
@@ -1314,5 +1455,195 @@ def test_txt_parser_rejects_oversized_block_with_safe_typed_error(
 
     with pytest.raises(ParserError) as raised:
         TxtParser().parse(b"pump")
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_txt_parser_stops_consuming_paragraphs_at_block_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paragraphs = _ExplodingSequence(
+        ("first", "second"), "TXT consumed content after exceeding the block limit"
+    )
+    monkeypatch.setattr(
+        "adapters.parsers.text._paragraphs",
+        lambda _text: paragraphs,
+        raising=False,
+    )
+    monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
+
+    with pytest.raises(ParserError) as raised:
+        TxtParser().parse(b"synthetic")
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_markdown_parser_stops_parsing_lines_at_block_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import adapters.parsers.markdown as markdown_module
+
+    original = markdown_module._atx_heading
+    calls = 0
+
+    def observed_heading(line: str) -> tuple[int, str] | None:
+        nonlocal calls
+        calls += 1
+        if calls > 2:
+            raise AssertionError(
+                "Markdown parsed content after exceeding the block limit"
+            )
+        return original(line)
+
+    monkeypatch.setattr(markdown_module, "_atx_heading", observed_heading)
+    monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
+
+    with pytest.raises(ParserError) as raised:
+        MarkdownParser().parse(b"# first\n# second\n# third")
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_docx_parser_stops_consuming_body_items_at_block_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ParagraphStub:
+        style = None
+
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    class DocumentStub:
+        def iter_inner_content(self) -> _ExplodingSequence[ParagraphStub]:
+            return _ExplodingSequence(
+                (ParagraphStub("first"), ParagraphStub("second")),
+                "DOCX consumed content after exceeding the block limit",
+            )
+
+    monkeypatch.setattr("adapters.parsers.docx.Paragraph", ParagraphStub)
+    monkeypatch.setattr("adapters.parsers.docx.Document", lambda *_a: DocumentStub())
+    monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
+
+    with pytest.raises(ParserError) as raised:
+        DocxParser().parse(synthetic_docx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_xlsx_parser_stops_consuming_worksheets_at_block_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WorkbookStub:
+        def __init__(self) -> None:
+            self.worksheets = _ExplodingSequence(
+                (
+                    _WorksheetStub((("first",),)),
+                    _WorksheetStub((("second",),)),
+                ),
+                "XLSX consumed content after exceeding the block limit",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("openpyxl.load_workbook", lambda *_a, **_k: WorkbookStub())
+    monkeypatch.setattr(parser_contract, "MAX_BLOCKS", 1)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(synthetic_xlsx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+@pytest.mark.parametrize(
+    ("limit", "value"),
+    [("MAX_BLOCKS", 1), ("MAX_TOTAL_TEXT_CHARS", 5)],
+)
+def test_pdf_parser_stops_consuming_pages_at_output_limit(
+    limit: str,
+    value: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = _ExplodingSequence(
+        (_PdfPageStub("one"), _PdfPageStub("two")),
+        "PDF consumed content after exceeding the output limit",
+    )
+    monkeypatch.setattr(
+        "adapters.parsers.pdf.PdfReader", lambda *_a, **_k: _PdfReaderStub(pages)
+    )
+    monkeypatch.setattr(parser_contract, limit, value)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_xlsx_parser_stops_collecting_table_before_render_at_character_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WorksheetStub:
+        title = "Stub"
+
+        def reset_dimensions(self) -> None:
+            pass
+
+        def iter_rows(self, *, values_only: bool) -> _ExplodingSequence[tuple[str]]:
+            assert values_only is True
+            return _ExplodingSequence(
+                (("oversized",),),
+                "XLSX continued collecting cells after the table text limit",
+            )
+
+    class WorkbookStub:
+        def __init__(self) -> None:
+            self.worksheets = [WorksheetStub()]
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    workbook = WorkbookStub()
+    monkeypatch.setattr("openpyxl.load_workbook", lambda *_a, **_k: workbook)
+    monkeypatch.setattr(parser_contract, "MAX_BLOCK_CHARS", 3)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(synthetic_xlsx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert workbook.closed is True
+
+
+def test_xlsx_parser_counts_table_separators_before_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cells = _ExplodingSequence(
+        ("x", "", "y"),
+        "XLSX continued collecting cells after separators exceeded the limit",
+    )
+
+    class WorksheetStub:
+        title = "Stub"
+
+        def reset_dimensions(self) -> None:
+            pass
+
+        def iter_rows(
+            self, *, values_only: bool
+        ) -> tuple[_ExplodingSequence[str], ...]:
+            assert values_only is True
+            return (cells,)
+
+    class WorkbookStub:
+        worksheets = [WorksheetStub()]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("openpyxl.load_workbook", lambda *_a, **_k: WorkbookStub())
+    monkeypatch.setattr(parser_contract, "MAX_BLOCK_CHARS", 3)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(synthetic_xlsx_bytes())
 
     _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
