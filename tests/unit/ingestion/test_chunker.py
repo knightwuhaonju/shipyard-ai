@@ -435,7 +435,7 @@ def test_table_packing_bounds_total_canonical_row_rendering_work(
         chunk.normalized_text.split("\n")[1:].count("x") for chunk in chunks
     )
     assert rendered_data_row_count == data_row_count
-    assert rendered_row_count <= 3 * data_row_count + 10
+    assert rendered_row_count == data_row_count + 1
 
 
 def test_oversized_table_header_uses_generic_canonical_tsv_fallback() -> None:

@@ -171,31 +171,31 @@ def _table_drafts(
         )
 
     drafts: list[_ChunkDraft] = []
-    current_rows: list[tuple[str, ...]] = []
+    current_row_texts: list[str] = []
     current_rendered_length = len(header_text)
 
     def flush_rows() -> None:
         nonlocal current_rendered_length
-        if not current_rows:
+        if not current_row_texts:
             return
-        rendered_group = _render_canonical_table_rows((header, *current_rows))
+        rendered_group = "\n".join((header_text, *current_row_texts))
         if rendered_group.strip():
             drafts.append(draft(rendered_group))
-        current_rows.clear()
+        current_row_texts.clear()
         current_rendered_length = len(header_text)
 
     for row in table[1:]:
         row_text = _render_canonical_table_rows((row,))
         candidate_length = current_rendered_length + 1 + len(row_text)
         if candidate_length <= body_budget:
-            current_rows.append(row)
+            current_row_texts.append(row_text)
             current_rendered_length = candidate_length
             continue
 
         flush_rows()
         candidate_length = len(header_text) + 1 + len(row_text)
         if candidate_length <= body_budget:
-            current_rows.append(row)
+            current_row_texts.append(row_text)
             current_rendered_length = candidate_length
             continue
 
