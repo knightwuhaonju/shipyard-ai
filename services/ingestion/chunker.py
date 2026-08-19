@@ -61,6 +61,83 @@ def _decorate(path: tuple[str, ...], body: str, max_chars: int) -> str:
     return normalized_text
 
 
+def _split_text(text: str, budget: int) -> tuple[str, ...]:
+    if len(text) <= budget:
+        return (text,)
+
+    fragments: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= budget:
+            fragment = remaining.strip()
+            if fragment:
+                fragments.append(fragment)
+            break
+
+        window = remaining[:budget]
+        boundary = window.rfind("\n")
+        if boundary < 0:
+            boundary = next(
+                (
+                    index
+                    for index in range(len(window) - 1, -1, -1)
+                    if window[index].isspace()
+                ),
+                -1,
+            )
+
+        if boundary >= 0:
+            fragment = remaining[:boundary].strip()
+            remaining = remaining[boundary + 1 :]
+        else:
+            fragment = remaining[:budget].strip()
+            remaining = remaining[budget:]
+        if fragment:
+            fragments.append(fragment)
+
+    assert fragments
+    return tuple(fragments)
+
+
+def _pack_paragraphs(
+    structural_path: tuple[str, ...],
+    page: int | None,
+    paragraphs: tuple[str, ...],
+    max_chars: int,
+) -> tuple[_ChunkDraft, ...]:
+    _, body_budget = _body_budget(structural_path, max_chars)
+    drafts: list[_ChunkDraft] = []
+    current = ""
+
+    def append(body: str) -> None:
+        drafts.append(
+            _ChunkDraft(
+                structural_path=structural_path,
+                normalized_text=_decorate(structural_path, body, max_chars),
+                page=page,
+            )
+        )
+
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) <= body_budget:
+            current = candidate
+            continue
+
+        if current:
+            append(current)
+            current = ""
+        if len(paragraph) <= body_budget:
+            current = paragraph
+            continue
+        for fragment in _split_text(paragraph, body_budget):
+            append(fragment)
+
+    if current:
+        append(current)
+    return tuple(drafts)
+
+
 def _materialize(
     version_id: UUID, drafts: list[_ChunkDraft]
 ) -> tuple[DocumentChunk, ...]:
@@ -91,13 +168,7 @@ def _structured_drafts(
         if paragraph_context is None:
             return
         path, page = paragraph_context
-        drafts.append(
-            _ChunkDraft(
-                structural_path=path,
-                normalized_text=_decorate(path, "\n\n".join(paragraphs), max_chars),
-                page=page,
-            )
-        )
+        drafts.extend(_pack_paragraphs(path, page, tuple(paragraphs), max_chars))
         paragraph_context = None
         paragraphs.clear()
 
@@ -107,13 +178,12 @@ def _structured_drafts(
             if _is_descendant_path(candidate_path, marker.structural_path):
                 remaining_markers.append(marker)
                 continue
-            drafts.append(
-                _ChunkDraft(
-                    structural_path=marker.structural_path,
-                    normalized_text=_decorate(
-                        marker.structural_path, marker.text, max_chars
-                    ),
-                    page=marker.page,
+            drafts.extend(
+                _pack_paragraphs(
+                    marker.structural_path,
+                    marker.page,
+                    (marker.text,),
+                    max_chars,
                 )
             )
         markers[:] = remaining_markers

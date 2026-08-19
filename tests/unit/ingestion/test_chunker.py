@@ -1,4 +1,8 @@
+from dataclasses import FrozenInstanceError
+from typing import Any, cast
 from uuid import UUID
+
+import pytest
 
 from packages.domain import DocumentChunk, document_chunk_id
 from services.ingestion.chunker import StructuralChunker
@@ -85,12 +89,17 @@ def test_class_rule_hierarchy_produces_deterministic_structural_chunks() -> None
 
 
 def test_different_version_id_changes_identity_without_changing_chunk_content() -> None:
-    document = _document(
-        ParsedBlock(
-            ordinal=0,
-            kind=ParsedBlockKind.PARAGRAPH,
-            text="Synthetic Requirement applies to every vessel.",
-        )
+    document = ParsedDocument(
+        format=DocumentFormat.PDF,
+        blocks=(
+            ParsedBlock(
+                ordinal=0,
+                kind=ParsedBlockKind.PAGE,
+                text="Synthetic Requirement applies to every vessel.",
+                structural_path=("Synthetic Requirement",),
+                page=2,
+            ),
+        ),
     )
 
     first = StructuralChunker().chunk(VERSION_ID, document)
@@ -105,6 +114,9 @@ def test_different_version_id_changes_identity_without_changing_chunk_content() 
     assert [chunk.structural_path for chunk in first] == [
         chunk.structural_path for chunk in second
     ]
+    assert [chunk.ordinal for chunk in first] == [chunk.ordinal for chunk in second]
+    assert [chunk.page for chunk in first] == [chunk.page for chunk in second]
+    assert [chunk.section for chunk in first] == [chunk.section for chunk in second]
 
 
 def test_marker_for_wholly_empty_sibling_subtree_emits_exactly_one_chunk() -> None:
@@ -173,6 +185,287 @@ def test_paragraph_regions_with_different_structural_paths_never_merge() -> None
     ]
     assert "witness check" not in chunks[0].normalized_text
     assert "alignment check" not in chunks[1].normalized_text
+
+
+def test_unstructured_fallback_splits_deterministically_without_overlap() -> None:
+    first = "Synthetic pump requirement alpha."
+    second = "Synthetic pump requirement beta."
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=first,
+        ),
+        ParsedBlock(
+            ordinal=1,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=second,
+        ),
+    )
+
+    chunks = StructuralChunker(max_chars=len(first)).chunk(VERSION_ID, document)
+
+    assert [chunk.structural_path for chunk in chunks] == [(), ()]
+    assert [chunk.section for chunk in chunks] == [None, None]
+    actual = "".join("".join(chunk.normalized_text.split()) for chunk in chunks)
+    expected = "".join((first + second).split())
+    assert actual == expected
+    assert all(len(chunk.normalized_text) <= len(first) for chunk in chunks)
+
+
+def test_page_boundaries_propagate_across_bounded_page_splits() -> None:
+    page_one = "alpha beta gamma delta"
+    page_three = "omega page"
+    document = ParsedDocument(
+        format=DocumentFormat.PDF,
+        blocks=(
+            ParsedBlock(
+                ordinal=0,
+                kind=ParsedBlockKind.PAGE,
+                text=page_one,
+                page=1,
+            ),
+            ParsedBlock(
+                ordinal=1,
+                kind=ParsedBlockKind.PAGE,
+                text=page_three,
+                page=3,
+            ),
+        ),
+    )
+
+    chunks = StructuralChunker(max_chars=len("alpha beta gamma")).chunk(
+        VERSION_ID, document
+    )
+
+    assert [chunk.page for chunk in chunks] == [1, 1, 3]
+    assert "".join(chunks[0].normalized_text.split()) + "".join(
+        chunks[1].normalized_text.split()
+    ) == "".join(page_one.split())
+    assert chunks[2].normalized_text == page_three
+
+
+def test_decorated_body_at_exact_boundary_stays_in_one_chunk() -> None:
+    path = ("S",)
+    body = "abcde"
+    max_chars = len("S\n\nabcde")
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=body,
+            structural_path=path,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=max_chars).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["S\n\nabcde"]
+
+
+def test_one_code_point_over_decorated_boundary_creates_two_chunks() -> None:
+    path = ("S",)
+    body = "abcdef"
+    max_chars = len("S\n\nabcde")
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=body,
+            structural_path=path,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=max_chars).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["S\n\nabcde", "S\n\nf"]
+
+
+def test_fallback_prefers_newline_then_whitespace_boundaries() -> None:
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="alpha\nbeta gamma delta",
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=12).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "alpha",
+        "beta gamma",
+        "delta",
+    ]
+
+
+def test_fallback_single_word_uses_exact_code_point_slices_without_overlap() -> None:
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="abcdefghij",
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=4).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["abcd", "efgh", "ij"]
+    assert "".join(chunk.normalized_text for chunk in chunks) == "abcdefghij"
+
+
+def test_prefix_is_omitted_when_exact_boundary_leaves_no_body_room() -> None:
+    path = ("S",)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="ab",
+            structural_path=path,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=len("S\n\n")).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["ab"]
+    assert chunks[0].structural_path == path
+    assert chunks[0].section == "S"
+
+
+def test_long_prefix_is_omitted_but_path_metadata_is_preserved() -> None:
+    path = ("Very Long Heading",)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="alpha",
+            structural_path=path,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=5).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["alpha"]
+    assert chunks[0].structural_path == path
+    assert chunks[0].section == "Very Long Heading"
+
+
+def test_long_prefix_heading_only_path_splits_with_metadata() -> None:
+    heading = "ExtremelyLongHeading"
+    path = (heading,)
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.HEADING,
+            text=heading,
+            structural_path=path,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=5).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == [
+        "Extre",
+        "melyL",
+        "ongHe",
+        "ading",
+    ]
+    assert all(chunk.structural_path == path for chunk in chunks)
+    assert all(chunk.section == heading for chunk in chunks)
+    assert all(len(chunk.normalized_text) <= 5 for chunk in chunks)
+
+
+def test_empty_path_preamble_fallback_stays_local_to_headed_content() -> None:
+    preamble = "synthetic preamble requires local fallback"
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text=preamble,
+        ),
+        ParsedBlock(
+            ordinal=1,
+            kind=ParsedBlockKind.HEADING,
+            text="Rules",
+            structural_path=("Rules",),
+        ),
+        ParsedBlock(
+            ordinal=2,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="applies",
+            structural_path=("Rules",),
+        ),
+    )
+
+    chunks = StructuralChunker(max_chars=15).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks[:-1]] == [
+        "synthetic",
+        "preamble",
+        "requires local",
+        "fallback",
+    ]
+    assert all(chunk.structural_path == () for chunk in chunks[:-1])
+    assert "".join(
+        "".join(chunk.normalized_text.split()) for chunk in chunks[:-1]
+    ) == "".join(preamble.split())
+    assert chunks[-1].structural_path == ("Rules",)
+    assert chunks[-1].normalized_text == "Rules\n\napplies"
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2000"])
+def test_public_validation_rejects_invalid_character_budget(value: object) -> None:
+    with pytest.raises(ValueError, match="^max_chars must be a positive integer$"):
+        StructuralChunker(max_chars=cast(Any, value))
+
+
+def test_public_validation_rejects_non_uuid_version_id() -> None:
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="synthetic requirement",
+        )
+    )
+
+    with pytest.raises(ValueError, match="^version_id must be a UUID$"):
+        StructuralChunker().chunk(cast(Any, str(VERSION_ID)), document)
+
+
+def test_public_validation_rejects_parsed_document_subclass() -> None:
+    class DerivedParsedDocument(ParsedDocument):
+        pass
+
+    document = DerivedParsedDocument(
+        format=DocumentFormat.MARKDOWN,
+        blocks=(
+            ParsedBlock(
+                ordinal=0,
+                kind=ParsedBlockKind.PARAGRAPH,
+                text="synthetic requirement",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="^document must be a ParsedDocument$"):
+        StructuralChunker().chunk(VERSION_ID, cast(Any, document))
+
+
+def test_public_validation_returns_immutable_exact_document_chunks() -> None:
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.PARAGRAPH,
+            text="synthetic requirement",
+        )
+    )
+
+    chunks = StructuralChunker().chunk(VERSION_ID, document)
+
+    assert type(chunks) is tuple
+    assert all(type(chunk) is DocumentChunk for chunk in chunks)
+    with pytest.raises(FrozenInstanceError):
+        setattr(chunks[0], "ordinal", 1)
 
 
 def test_ordinals_are_global_and_contiguous_across_draft_kinds() -> None:
