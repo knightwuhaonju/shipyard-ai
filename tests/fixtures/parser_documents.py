@@ -6,6 +6,7 @@ from io import BytesIO
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
 from openpyxl import Workbook  # type: ignore[import-untyped]
+from pypdf import PdfWriter
 
 
 def synthetic_txt_bytes() -> bytes:
@@ -141,3 +142,104 @@ def trailing_blank_xlsx_bytes() -> bytes:
         return output.getvalue()
     finally:
         workbook.close()
+
+
+def synthetic_pdf_bytes() -> bytes:
+    """Return a deterministic two-page PDF with extractable text streams."""
+    return _minimal_pdf_bytes(("Synthetic page one", "Synthetic page two"))
+
+
+def blank_pdf_bytes() -> bytes:
+    """Return a valid one-page PDF without a text layer."""
+    writer = PdfWriter()
+    try:
+        writer.add_blank_page(width=612, height=792)
+        output = BytesIO()
+        writer.write(output)
+        return output.getvalue()
+    finally:
+        writer.close()
+
+
+def encrypted_pdf_bytes() -> bytes:
+    """Return a valid synthetic password-protected PDF."""
+    writer = PdfWriter()
+    try:
+        writer.add_blank_page(width=612, height=792)
+        writer.encrypt("synthetic-test-password")
+        output = BytesIO()
+        writer.write(output)
+        return output.getvalue()
+    finally:
+        writer.close()
+
+
+def pdf_with_blank_middle_page_bytes() -> bytes:
+    """Return text pages separated by one valid blank page."""
+    return _minimal_pdf_bytes(("First text page", None, "Third text page"))
+
+
+def _minimal_pdf_bytes(page_texts: tuple[str | None, ...]) -> bytes:
+    object_bodies: list[bytes] = []
+    page_references: list[bytes] = []
+    font_object_number = 3 + 2 * len(page_texts)
+
+    for page_index, page_text in enumerate(page_texts):
+        page_object_number = 3 + 2 * page_index
+        content_object_number = page_object_number + 1
+        page_references.append(f"{page_object_number} 0 R".encode())
+        resources = (
+            f"/Resources << /Font << /F1 {font_object_number} 0 R >> >> "
+            if page_text is not None
+            else ""
+        )
+        object_bodies.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                f"{resources}/Contents {content_object_number} 0 R >>"
+            ).encode()
+        )
+        stream = (
+            f"BT /F1 12 Tf 72 720 Td ({page_text}) Tj ET".encode()
+            if page_text is not None
+            else b""
+        )
+        object_bodies.append(
+            b"<< /Length "
+            + str(len(stream)).encode()
+            + b">>\nstream\n"
+            + stream
+            + b"\nendstream"
+        )
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids ["
+        + b" ".join(page_references)
+        + b"] /Count "
+        + str(len(page_texts)).encode()
+        + b" >>",
+        *object_bodies,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_number, body in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{object_number} 0 obj\n".encode())
+        output.extend(body)
+        output.extend(b"\nendobj\n")
+
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode())
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode())
+    output.extend(
+        b"trailer\n<< /Size "
+        + str(len(objects) + 1).encode()
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(xref_offset).encode()
+        + b"\n%%EOF\n"
+    )
+    return bytes(output)

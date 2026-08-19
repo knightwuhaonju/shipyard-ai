@@ -1,19 +1,23 @@
 """Tests for the immutable, parser-neutral ingestion contract."""
 
+import ast
 import socket
 import struct
 import warnings
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from io import BytesIO
+from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+from pypdf.errors import FileNotDecryptedError, PdfStreamError
 
 import services.ingestion.parser as parser_contract
 from adapters.parsers._common import validate_ooxml_archive
 from adapters.parsers.docx import DocxParser
 from adapters.parsers.markdown import MarkdownParser
+from adapters.parsers.pdf import PdfParser
 from adapters.parsers.text import TxtParser
 from adapters.parsers.xlsx import XlsxParser
 from services.ingestion import (
@@ -31,11 +35,15 @@ from services.ingestion import (
 )
 from tests.fixtures.parser_documents import (
     blank_docx_bytes,
+    blank_pdf_bytes,
     blank_xlsx_bytes,
+    encrypted_pdf_bytes,
     heading_hierarchy_docx_bytes,
     merged_table_docx_bytes,
+    pdf_with_blank_middle_page_bytes,
     synthetic_docx_bytes,
     synthetic_markdown_bytes,
+    synthetic_pdf_bytes,
     synthetic_txt_bytes,
     synthetic_xlsx_bytes,
     trailing_blank_xlsx_bytes,
@@ -44,8 +52,10 @@ from tests.fixtures.parser_documents import (
 _PARSER_ERROR_MESSAGES = {
     ParserErrorCode.INVALID_DOCUMENT: "document cannot be parsed",
     ParserErrorCode.UNSUPPORTED_ENCODING: "document text encoding is unsupported",
+    ParserErrorCode.ENCRYPTED_DOCUMENT: "encrypted documents are unsupported",
     ParserErrorCode.RESOURCE_LIMIT: "document exceeds parser resource limits",
     ParserErrorCode.EMPTY_DOCUMENT: "document contains no parseable content",
+    ParserErrorCode.OCR_REQUIRED: "PDF has no extractable text layer",
 }
 
 _TEXT_PARSER_FACTORIES: tuple[Callable[[], Parser], ...] = (
@@ -156,6 +166,40 @@ class _WorkbookStub:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _PdfContentsStub:
+    def __init__(self, data: bytes | Exception) -> None:
+        self._data = data
+        self.get_data_calls = 0
+
+    def get_data(self) -> bytes:
+        self.get_data_calls += 1
+        if isinstance(self._data, Exception):
+            raise self._data
+        return self._data
+
+
+class _PdfPageStub:
+    def __init__(self, text: str, contents: _PdfContentsStub | None = None) -> None:
+        self._text = text
+        self._contents = contents
+        self.extract_text_calls = 0
+
+    def get_contents(self) -> _PdfContentsStub | None:
+        return self._contents
+
+    def extract_text(self) -> str:
+        if self._contents is not None and self._contents.get_data_calls != 1:
+            raise AssertionError("PDF content stream was not decoded exactly once")
+        self.extract_text_calls += 1
+        return self._text
+
+
+class _PdfReaderStub:
+    def __init__(self, pages: object, *, is_encrypted: bool = False) -> None:
+        self.pages = pages
+        self.is_encrypted = is_encrypted
 
 
 def _assert_parser_error(
@@ -704,6 +748,268 @@ def test_xlsx_parser_does_not_make_network_connections(
     parsed = XlsxParser().parse(synthetic_xlsx_bytes())
 
     assert parsed.blocks[0].sheet == "泵组"
+
+
+def test_pdf_parser_preserves_one_based_page_locations() -> None:
+    parsed = PdfParser().parse(synthetic_pdf_bytes())
+
+    assert parsed.format is DocumentFormat.PDF
+    assert [block.kind for block in parsed.blocks] == [
+        ParsedBlockKind.PAGE,
+        ParsedBlockKind.PAGE,
+    ]
+    assert [block.page for block in parsed.blocks] == [1, 2]
+    assert "Synthetic page one" in parsed.blocks[0].text
+
+
+def test_pdf_without_text_layer_requires_ocr_but_never_invokes_it() -> None:
+    with pytest.raises(ParserError) as captured:
+        PdfParser().parse(blank_pdf_bytes())
+
+    assert captured.value.code is ParserErrorCode.OCR_REQUIRED
+    assert str(captured.value) == "PDF has no extractable text layer"
+
+
+def test_pdf_parser_preserves_page_gap_when_middle_page_is_blank() -> None:
+    parsed = PdfParser().parse(pdf_with_blank_middle_page_bytes())
+
+    assert [block.page for block in parsed.blocks] == [1, 3]
+    assert [block.text for block in parsed.blocks] == [
+        "First text page",
+        "Third text page",
+    ]
+
+
+def test_pdf_parser_rejects_encrypted_pdf_without_calling_decrypt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_decrypt(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("PDF parser attempted password decryption")
+
+    monkeypatch.setattr("pypdf.PdfReader.decrypt", fail_decrypt)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(encrypted_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.ENCRYPTED_DOCUMENT)
+
+
+def test_pdf_parser_translates_malformed_pdf_to_safe_typed_error() -> None:
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(b"%PDF-1.4\nmalformed synthetic object")
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize(
+    ("content", "code"),
+    [
+        (b"", ParserErrorCode.EMPTY_DOCUMENT),
+        ("document.pdf", ParserErrorCode.INVALID_DOCUMENT),
+        (BytesIO(b"%PDF"), ParserErrorCode.INVALID_DOCUMENT),
+    ],
+    ids=["empty", "path-string", "byte-stream"],
+)
+def test_pdf_parser_validates_bytes_before_pypdf(
+    content: object,
+    code: ParserErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_reader(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pypdf received invalid parser input")
+
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", fail_reader)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(content)  # type: ignore[arg-type]
+
+    _assert_parser_error(raised, code)
+
+
+def test_pdf_parser_uses_strict_in_memory_reader_and_decodes_before_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contents = _PdfContentsStub(b"BT (Stub page) Tj ET")
+    page = _PdfPageStub("Stub page", contents)
+    reader = _PdfReaderStub((page,))
+    received_bytes: bytes | None = None
+
+    def fake_reader(source: object, *, strict: bool) -> _PdfReaderStub:
+        nonlocal received_bytes
+        assert isinstance(source, BytesIO)
+        received_bytes = source.getvalue()
+        assert strict is True
+        return reader
+
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", fake_reader)
+
+    parsed = PdfParser().parse(synthetic_pdf_bytes())
+
+    assert received_bytes == synthetic_pdf_bytes()
+    assert parsed.blocks[0].text == "Stub page"
+    assert contents.get_data_calls == 1
+    assert page.extract_text_calls == 1
+
+
+def test_pdf_parser_checks_page_count_before_page_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UniteratedPages:
+        def __len__(self) -> int:
+            return 2
+
+        def __iter__(self) -> object:
+            raise AssertionError("PDF pages were iterated beyond the declared limit")
+
+    reader = _PdfReaderStub(UniteratedPages())
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", lambda *_a, **_k: reader)
+    monkeypatch.setattr(parser_contract, "MAX_PDF_PAGES", 1)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_pdf_parser_limits_decoded_page_stream_before_text_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contents = _PdfContentsStub(b"1234")
+    page = _PdfPageStub("must not be extracted", contents)
+    reader = _PdfReaderStub((page,))
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", lambda *_a, **_k: reader)
+    monkeypatch.setattr(parser_contract, "MAX_PDF_PAGE_STREAM_BYTES", 3)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert contents.get_data_calls == 1
+    assert page.extract_text_calls == 0
+
+
+def test_pdf_parser_accepts_exact_page_and_stream_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parser_contract, "MAX_PDF_PAGES", 2)
+    monkeypatch.setattr(parser_contract, "MAX_PDF_PAGE_STREAM_BYTES", 49)
+
+    parsed = PdfParser().parse(synthetic_pdf_bytes())
+
+    assert [block.page for block in parsed.blocks] == [1, 2]
+
+
+def test_pdf_parser_rejects_nul_extracted_text_with_safe_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pypdf._page.PageObject.extract_text", lambda _page: "bad\x00")
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize(
+    ("limit", "value"),
+    [("MAX_BLOCK_CHARS", 10), ("MAX_TOTAL_TEXT_CHARS", 20)],
+)
+def test_pdf_parser_translates_output_character_limits(
+    limit: str,
+    value: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parser_contract, limit, value)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (PdfStreamError("sensitive stream details"), ParserErrorCode.INVALID_DOCUMENT),
+        (
+            FileNotDecryptedError("sensitive encryption details"),
+            ParserErrorCode.ENCRYPTED_DOCUMENT,
+        ),
+    ],
+)
+def test_pdf_parser_translates_expected_pypdf_errors_without_leaking_details(
+    error: Exception,
+    code: ParserErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_reader(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", fail_reader)
+
+    with pytest.raises(ParserError) as raised:
+        PdfParser().parse(synthetic_pdf_bytes())
+
+    _assert_parser_error(raised, code)
+
+
+def test_pdf_parser_does_not_swallow_unexpected_extraction_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenPage:
+        def get_contents(self) -> None:
+            return None
+
+        def extract_text(self) -> str:
+            raise ValueError("programmer error")
+
+    reader = _PdfReaderStub((BrokenPage(),))
+    monkeypatch.setattr("adapters.parsers.pdf.PdfReader", lambda *_a, **_k: reader)
+
+    with pytest.raises(ValueError, match="^programmer error$"):
+        PdfParser().parse(synthetic_pdf_bytes())
+
+
+def test_pdf_adapter_imports_no_ocr_rendering_model_or_io_subsystems() -> None:
+    tree = ast.parse(Path("adapters/parsers/pdf.py").read_text(encoding="utf-8"))
+    imports = {
+        name.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for name in node.names
+    }
+    imports.update(
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    )
+    forbidden_prefixes = (
+        "adapters.ocr",
+        "fitz",
+        "httpx",
+        "ocrmypdf",
+        "pdf2image",
+        "pytesseract",
+        "requests",
+        "services.model_gateway",
+        "services.retrieval",
+        "sqlalchemy",
+        "urllib",
+    )
+
+    assert imports <= {
+        "__future__",
+        "io",
+        "pypdf",
+        "pypdf.errors",
+        "services.ingestion",
+        "services.ingestion.parser",
+    }
+    assert not any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for module in imports
+        for prefix in forbidden_prefixes
+    )
 
 
 def test_markdown_parser_recognizes_setext_headings() -> None:
