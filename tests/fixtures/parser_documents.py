@@ -1,9 +1,11 @@
 """Deterministic byte fixtures for document parser adapter tests."""
 
+from datetime import date, datetime, time
 from io import BytesIO
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from openpyxl import Workbook  # type: ignore[import-untyped]
 
 
 def synthetic_txt_bytes() -> bytes:
@@ -77,3 +79,65 @@ def heading_hierarchy_docx_bytes() -> bytes:
     output = BytesIO()
     document.save(output)
     return output.getvalue()
+
+
+def synthetic_xlsx_bytes() -> bytes:
+    """Return a synthetic workbook with ordered typed worksheet tables."""
+    workbook = Workbook()
+    workbook.iso_dates = True
+    try:
+        pumps = workbook.active
+        pumps.title = "泵组"
+        pumps.append(("项目", "计算", "日期", "通过", "备注", "状态"))
+        pumps.append(("轴封", "=1+1", date(2026, 8, 19), True, None, "待复核"))
+        pumps.append(
+            (
+                "泵轴",
+                1.25,
+                datetime(2026, 8, 19, 14, 30, 45),
+                False,
+                time(6, 15, 30),
+                "完成",
+            )
+        )
+
+        workbook.create_sheet("空白")
+        materials = workbook.create_sheet("材料")
+        materials.append(("材料", "数量"))
+        materials.append(("钢板", 12))
+
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+    finally:
+        workbook.close()
+
+
+def blank_xlsx_bytes() -> bytes:
+    """Return a workbook containing only blank worksheets."""
+    workbook = Workbook()
+    try:
+        workbook.active.title = "空白一"
+        workbook.active.append((None, None))
+        workbook.create_sheet("空白二")
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+    finally:
+        workbook.close()
+
+
+def trailing_blank_xlsx_bytes() -> bytes:
+    """Return a workbook with interior and trailing blank table cells."""
+    workbook = Workbook()
+    try:
+        worksheet = workbook.active
+        worksheet.title = "裁尾"
+        worksheet.append(("项目", "数量", "备注", ""))
+        worksheet.append(("泵", 2, None, ""))
+        worksheet.append(("", "", "", ""))
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
+    finally:
+        workbook.close()

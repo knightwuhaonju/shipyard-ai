@@ -15,6 +15,7 @@ from adapters.parsers._common import validate_ooxml_archive
 from adapters.parsers.docx import DocxParser
 from adapters.parsers.markdown import MarkdownParser
 from adapters.parsers.text import TxtParser
+from adapters.parsers.xlsx import XlsxParser
 from services.ingestion import (
     DocumentFormat,
     ParsedBlock,
@@ -30,11 +31,14 @@ from services.ingestion import (
 )
 from tests.fixtures.parser_documents import (
     blank_docx_bytes,
+    blank_xlsx_bytes,
     heading_hierarchy_docx_bytes,
     merged_table_docx_bytes,
     synthetic_docx_bytes,
     synthetic_markdown_bytes,
     synthetic_txt_bytes,
+    synthetic_xlsx_bytes,
+    trailing_blank_xlsx_bytes,
 )
 
 _PARSER_ERROR_MESSAGES = {
@@ -109,6 +113,49 @@ def _docx_with_external_relationship() -> bytes:
                 )
             target_archive.writestr(member, content)
     return output.getvalue()
+
+
+def _xlsx_with_underreported_dimension() -> bytes:
+    source = BytesIO(synthetic_xlsx_bytes())
+    output = BytesIO()
+    worksheet_path = "xl/worksheets/sheet1.xml"
+    with ZipFile(source) as source_archive, ZipFile(output, "w") as target_archive:
+        for member in source_archive.infolist():
+            content = source_archive.read(member)
+            if member.filename == worksheet_path:
+                dimension_start = content.index(b"<dimension ")
+                dimension_end = content.index(b"/>", dimension_start) + 2
+                content = (
+                    content[:dimension_start]
+                    + b'<dimension ref="A1"/>'
+                    + content[dimension_end:]
+                )
+            target_archive.writestr(member, content)
+    return output.getvalue()
+
+
+class _WorksheetStub:
+    def __init__(self, rows: tuple[tuple[object, ...], ...]) -> None:
+        self.title = "Stub"
+        self._rows = rows
+        self.reset_called = False
+
+    def reset_dimensions(self) -> None:
+        self.reset_called = True
+
+    def iter_rows(self, *, values_only: bool) -> tuple[tuple[object, ...], ...]:
+        if values_only is not True:
+            raise AssertionError("XLSX parser did not request values_only rows")
+        return self._rows
+
+
+class _WorkbookStub:
+    def __init__(self, worksheet: _WorksheetStub) -> None:
+        self.worksheets = [worksheet]
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def _assert_parser_error(
@@ -459,6 +506,204 @@ def test_docx_parser_does_not_follow_http_relationships(
     parsed = DocxParser().parse(_docx_with_external_relationship())
 
     assert parsed.blocks[0].text == "合成船级规则"
+
+
+def test_xlsx_parser_returns_one_whole_table_per_nonempty_sheet() -> None:
+    parsed = XlsxParser().parse(synthetic_xlsx_bytes())
+
+    assert parsed.format is DocumentFormat.XLSX
+    assert [block.sheet for block in parsed.blocks] == ["泵组", "材料"]
+    assert [block.ordinal for block in parsed.blocks] == [0, 1]
+    assert all(block.kind is ParsedBlockKind.TABLE for block in parsed.blocks)
+    assert parsed.blocks[0].structural_path == ("泵组",)
+    assert "=1+1" in parsed.blocks[0].text
+    assert "TRUE" in parsed.blocks[0].text
+
+
+def test_xlsx_parser_converts_types_and_preserves_interior_empty_cells() -> None:
+    parsed = XlsxParser().parse(synthetic_xlsx_bytes())
+
+    assert parsed.blocks[0].table == (
+        ("项目", "计算", "日期", "通过", "备注", "状态"),
+        ("轴封", "=1+1", "2026-08-19", "TRUE", "", "待复核"),
+        (
+            "泵轴",
+            "1.25",
+            "2026-08-19T14:30:45",
+            "FALSE",
+            "06:15:30",
+            "完成",
+        ),
+    )
+    assert parsed.blocks[1].table == (("材料", "数量"), ("钢板", "12"))
+
+
+def test_xlsx_parser_trims_only_trailing_empty_rows_and_columns() -> None:
+    parsed = XlsxParser().parse(trailing_blank_xlsx_bytes())
+
+    assert parsed.blocks[0].table == (
+        ("项目", "数量", "备注"),
+        ("泵", "2", ""),
+    )
+
+
+def test_xlsx_parser_skips_all_blank_sheets_and_rejects_empty_workbook() -> None:
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(blank_xlsx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.EMPTY_DOCUMENT)
+
+
+def test_xlsx_parser_ignores_underreported_worksheet_dimension() -> None:
+    parsed = XlsxParser().parse(_xlsx_with_underreported_dimension())
+
+    assert parsed.blocks[0].table is not None
+    assert parsed.blocks[0].table[-1] == (
+        "泵轴",
+        "1.25",
+        "2026-08-19T14:30:45",
+        "FALSE",
+        "06:15:30",
+        "完成",
+    )
+
+
+def test_xlsx_parser_uses_safe_load_flags_values_only_and_closes_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worksheet = _WorksheetStub((("item", "qty"), ("pump", 2)))
+    workbook = _WorkbookStub(worksheet)
+    received_options: dict[str, object] = {}
+
+    def fake_load_workbook(source: object, **options: object) -> _WorkbookStub:
+        assert isinstance(source, BytesIO)
+        received_options.update(options)
+        return workbook
+
+    monkeypatch.setattr("openpyxl.load_workbook", fake_load_workbook)
+
+    parsed = XlsxParser().parse(synthetic_xlsx_bytes())
+
+    assert parsed.blocks[0].table == (("item", "qty"), ("pump", "2"))
+    assert received_options == {
+        "read_only": True,
+        "data_only": False,
+        "keep_links": False,
+        "keep_vba": False,
+    }
+    assert worksheet.reset_called is True
+    assert workbook.closed is True
+
+
+def test_xlsx_parser_closes_workbook_when_parsing_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worksheet = _WorksheetStub((("item",),))
+    workbook = _WorkbookStub(worksheet)
+    monkeypatch.setattr("openpyxl.load_workbook", lambda *_args, **_kwargs: workbook)
+    monkeypatch.setattr(parser_contract, "MAX_TABLE_ROWS", 0)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(synthetic_xlsx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+    assert workbook.closed is True
+
+
+@pytest.mark.parametrize(
+    ("content", "code"),
+    [
+        (b"", ParserErrorCode.EMPTY_DOCUMENT),
+        (_zip_bytes((("../escape.xml", b"unsafe"),)), ParserErrorCode.INVALID_DOCUMENT),
+    ],
+    ids=["empty-source", "unsafe-archive"],
+)
+def test_xlsx_parser_validates_source_and_archive_before_openpyxl(
+    content: bytes,
+    code: ParserErrorCode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_load(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("openpyxl received unsafe source bytes")
+
+    monkeypatch.setattr("openpyxl.load_workbook", fail_load)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(content)
+
+    _assert_parser_error(raised, code)
+
+
+@pytest.mark.parametrize("content", ["workbook.xlsx", BytesIO(b"workbook")])
+def test_xlsx_parser_rejects_non_bytes_before_openpyxl(
+    content: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_load(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("openpyxl received a non-bytes parser input")
+
+    monkeypatch.setattr("openpyxl.load_workbook", fail_load)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(content)  # type: ignore[arg-type]
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize(
+    ("limit", "value"),
+    [
+        ("MAX_TABLE_ROWS", 2),
+        ("MAX_TABLE_COLUMNS", 5),
+        ("MAX_TABLE_CELLS", 17),
+    ],
+)
+def test_xlsx_parser_enforces_table_limits_during_iteration(
+    limit: str,
+    value: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parser_contract, limit, value)
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(synthetic_xlsx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_xlsx_parser_accepts_exact_table_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parser_contract, "MAX_TABLE_ROWS", 3)
+    monkeypatch.setattr(parser_contract, "MAX_TABLE_COLUMNS", 6)
+    monkeypatch.setattr(parser_contract, "MAX_TABLE_CELLS", 18)
+
+    parsed = XlsxParser().parse(synthetic_xlsx_bytes())
+
+    assert [block.sheet for block in parsed.blocks] == ["泵组", "材料"]
+
+
+def test_xlsx_parser_translates_malformed_workbook_to_safe_typed_error() -> None:
+    malformed = _zip_bytes((("[Content_Types].xml", b"<broken"),))
+
+    with pytest.raises(ParserError) as raised:
+        XlsxParser().parse(malformed)
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+def test_xlsx_parser_does_not_make_network_connections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_network(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("XLSX parser attempted outbound network access")
+
+    monkeypatch.setattr(socket.socket, "connect", fail_network)
+    monkeypatch.setattr(socket, "create_connection", fail_network)
+
+    parsed = XlsxParser().parse(synthetic_xlsx_bytes())
+
+    assert parsed.blocks[0].sheet == "泵组"
 
 
 def test_markdown_parser_recognizes_setext_headings() -> None:
