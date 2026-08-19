@@ -1,7 +1,7 @@
 # Task 010 Parser Adapters Design
 
-**Date:** 2026-08-19  
-**Status:** Approved for implementation planning  
+**Date:** 2026-08-19
+**Status:** Approved for implementation planning
 **Task:** `tasks/010-parser-adapters.md`
 
 ## 1. Scope

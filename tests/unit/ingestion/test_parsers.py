@@ -14,12 +14,14 @@ import pytest
 from pypdf.errors import FileNotDecryptedError, PdfStreamError
 
 import services.ingestion.parser as parser_contract
+from adapters.parsers import (
+    DocxParser,
+    MarkdownParser,
+    PdfParser,
+    TxtParser,
+    XlsxParser,
+)
 from adapters.parsers._common import validate_ooxml_archive
-from adapters.parsers.docx import DocxParser
-from adapters.parsers.markdown import MarkdownParser
-from adapters.parsers.pdf import PdfParser
-from adapters.parsers.text import TxtParser
-from adapters.parsers.xlsx import XlsxParser
 from services.ingestion import (
     DocumentFormat,
     ParsedBlock,
@@ -233,6 +235,101 @@ def test_parser_contract_builds_one_immutable_common_document() -> None:
     assert parsed.blocks == (block,)
     with pytest.raises(FrozenInstanceError):
         block.text = "changed"  # type: ignore[misc]
+
+
+def test_parser_adapters_respect_architecture_and_common_surface() -> None:
+    allowed_import_roots = {
+        "collections",
+        "datetime",
+        "docx",
+        "enum",
+        "io",
+        "lxml",
+        "openpyxl",
+        "pathlib",
+        "pypdf",
+        "re",
+        "services",
+        "typing",
+        "zipfile",
+    }
+    denied_import_prefixes = {
+        "adapters.ocr",
+        "anthropic",
+        "cohere",
+        "fitz",
+        "google.generativeai",
+        "httpx",
+        "mistralai",
+        "ocrmypdf",
+        "openai",
+        "pdf2image",
+        "pytesseract",
+        "requests",
+        "services.retrieval",
+        "socket",
+        "sqlalchemy",
+        "urllib",
+    }
+    imported_modules: set[str] = set()
+    non_relative_roots: set[str] = set()
+
+    for path in sorted(Path("adapters/parsers").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for name in node.names:
+                    imported_modules.add(name.name)
+                    non_relative_roots.add(name.name.split(".", maxsplit=1)[0])
+            # __future__ selects compiler behavior; it is not a runtime dependency.
+            elif isinstance(node, ast.ImportFrom) and node.module != "__future__":
+                if node.level:
+                    package_parts = ["adapters", "parsers"]
+                    parent_count = node.level - 1
+                    relative_parts = package_parts[: len(package_parts) - parent_count]
+                    if node.module is not None:
+                        relative_parts.extend(node.module.split("."))
+                    imported_modules.add(".".join(relative_parts))
+                elif node.module is not None:
+                    imported_modules.add(node.module)
+                    non_relative_roots.add(node.module.split(".", maxsplit=1)[0])
+
+    assert non_relative_roots <= allowed_import_roots
+    assert not any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for module in imported_modules
+        for prefix in denied_import_prefixes
+    )
+
+    parsers: tuple[Parser, ...] = (
+        TxtParser(),
+        MarkdownParser(),
+        DocxParser(),
+        XlsxParser(),
+        PdfParser(),
+    )
+    sources = (
+        synthetic_txt_bytes(),
+        synthetic_markdown_bytes(),
+        synthetic_docx_bytes(),
+        synthetic_xlsx_bytes(),
+        synthetic_pdf_bytes(),
+    )
+    formats = (
+        DocumentFormat.TXT,
+        DocumentFormat.MARKDOWN,
+        DocumentFormat.DOCX,
+        DocumentFormat.XLSX,
+        DocumentFormat.PDF,
+    )
+
+    for parser, source, format_ in zip(parsers, sources, formats, strict=True):
+        parsed = parser.parse(source)
+
+        assert parser.format is format_
+        assert isinstance(parsed, ParsedDocument)
+        assert parsed.format is format_
+        assert parsed.blocks
 
 
 @pytest.mark.parametrize(

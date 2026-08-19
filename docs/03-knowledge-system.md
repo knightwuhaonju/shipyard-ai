@@ -51,7 +51,46 @@ V1 parsers:
 - TXT
 - Markdown
 
-OCR is an adapter. Scanned-PDF OCR output must remain linked to page numbers and original file.
+The parser contract lives in the ingestion service; format implementations are
+replaceable adapters. Each adapter accepts file bytes only. A parser does not
+receive a path, storage credential, authorization context, or persistence
+handle, and it does not perform network, model, retrieval, chunking, or
+external-process work.
+
+Every adapter returns the same immutable `ParsedDocument`, containing ordered
+immutable `ParsedBlock` values with contiguous ordinals. Blocks preserve the
+source structure that later stages need: heading paths and whole rectangular
+tables, XLSX sheet names, and original one-based PDF page numbers. Task 011
+owns chunking; Task 010 neither chunks nor persists parser output. Parsed text
+and cell values remain untrusted source data, never executable instructions.
+
+Supported parsing behavior is deliberately bounded and deterministic:
+
+- TXT accepts UTF-8 (including a byte-order mark) and emits non-empty
+  paragraph blocks.
+- Markdown recognizes a non-rendering subset of ATX and Setext headings,
+  paragraphs, and rectangular pipe tables. Fenced code and raw HTML remain
+  literal text.
+- DOCX preserves top-level paragraph/table order, Title and Heading 1-9 paths,
+  and complete rectangular tables, including deterministic merged-cell values.
+- XLSX emits each non-empty worksheet as one whole table in workbook order,
+  with its sheet title. Formula cells remain literal formula strings; macros
+  and external links are not executed or followed.
+- PDF reads only the existing text layer, emits one block per non-empty page,
+  and retains the page's original one-based number. A textless PDF returns
+  `OCR_REQUIRED`. OCR is disabled in Task 010; a later optional OCR adapter is
+  owned by Task 012 and must preserve page provenance and the original file.
+
+Expected failures use a typed `ParserErrorCode` and a fixed safe message:
+invalid or encrypted input, unsupported text encoding, empty content, resource
+limit, or OCR required. Limits are enforced before or while parsing: 25 MiB
+source bytes, 10,000 blocks, 1,000,000 characters per block, 5,000,000 total
+characters, and tables of at most 10,000 rows, 256 columns, and 100,000 cells.
+OOXML ZIP preflight permits at most 10,000 members, 100 MiB declared
+uncompressed size, and a 100:1 declared compression ratio without extracting
+members. PDFs permit at most 2,000 pages and 10 MiB of decoded content-stream
+data per page. Limit and parse failures do not reveal archive member names or
+library exception details.
 
 ## 3. Chunking
 

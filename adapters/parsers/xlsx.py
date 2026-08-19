@@ -14,7 +14,6 @@ from openpyxl.utils.exceptions import (  # type: ignore[import-untyped]
 )
 
 import services.ingestion.parser as parser_contract
-from adapters.parsers._common import validate_ooxml_archive
 from services.ingestion import (
     DocumentFormat,
     ParsedBlock,
@@ -27,6 +26,8 @@ from services.ingestion import (
     render_table,
     validate_source_bytes,
 )
+
+from ._common import validate_ooxml_archive
 
 _RESOURCE_LIMIT_ERRORS = frozenset(
     {
