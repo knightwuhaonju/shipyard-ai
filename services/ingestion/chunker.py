@@ -10,7 +10,6 @@ from services.ingestion.parser import (
     ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
-    render_table,
 )
 
 DEFAULT_MAX_CHARS = 2_000
@@ -143,6 +142,10 @@ def _pack_paragraphs(
     return tuple(drafts)
 
 
+def _render_canonical_table_rows(rows: tuple[tuple[str, ...], ...]) -> str:
+    return "\n".join("\t".join(row) for row in rows)
+
+
 def _table_drafts(
     block: ParsedBlock, max_chars: int
 ) -> tuple[_ChunkDraft, ...]:
@@ -161,7 +164,7 @@ def _table_drafts(
         return (draft(block.text),)
 
     header = table[0]
-    if len(render_table((header,))) > body_budget:
+    if len(_render_canonical_table_rows((header,))) > body_budget:
         return tuple(
             draft(fragment) for fragment in _split_text(block.text, body_budget)
         )
@@ -172,22 +175,22 @@ def _table_drafts(
     def flush_rows() -> None:
         if not current_rows:
             return
-        drafts.append(draft(render_table((header, *current_rows))))
+        drafts.append(draft(_render_canonical_table_rows((header, *current_rows))))
         current_rows.clear()
 
     for row in table[1:]:
-        candidate = render_table((header, *current_rows, row))
+        candidate = _render_canonical_table_rows((header, *current_rows, row))
         if len(candidate) <= body_budget:
             current_rows.append(row)
             continue
 
         flush_rows()
-        candidate = render_table((header, row))
+        candidate = _render_canonical_table_rows((header, row))
         if len(candidate) <= body_budget:
             current_rows.append(row)
             continue
 
-        row_text = render_table((row,))
+        row_text = _render_canonical_table_rows((row,))
         drafts.extend(
             draft(fragment) for fragment in _split_text(row_text, body_budget)
         )

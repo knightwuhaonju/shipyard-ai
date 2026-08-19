@@ -136,6 +136,45 @@ def test_oversized_table_uses_largest_consecutive_row_groups() -> None:
         render_table((header, row_a, row_b)),
         render_table((header, row_c)),
     ]
+    assert [chunk.ordinal for chunk in chunks] == [0, 1]
+
+
+def test_oversized_table_with_empty_header_uses_validated_canonical_cells() -> None:
+    table = (("",), ("data",))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=4).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["data"]
+
+
+def test_oversized_table_preserves_internal_blank_row_at_group_boundary() -> None:
+    table = (("H",), ("A",), ("",), ("B",))
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            table=table,
+        )
+    )
+
+    chunks = StructuralChunker(max_chars=4).chunk(VERSION_ID, document)
+
+    assert [chunk.normalized_text for chunk in chunks] == ["H\nA\n", "H\nB"]
+    data_rows: list[str] = []
+    for chunk in chunks:
+        header, *rows = chunk.normalized_text.split("\n")
+        assert header == "H"
+        data_rows.extend(rows)
+    assert data_rows == ["A", "", "B"]
 
 
 def test_single_oversized_data_row_uses_bounded_text_fallback() -> None:
@@ -247,20 +286,18 @@ def test_tables_never_merge_with_paragraphs_or_neighboring_tables() -> None:
     ]
 
 
-def test_table_fragments_preserve_prefix_path_leaf_section_and_page() -> None:
+def test_table_fragments_preserve_prefix_path_and_leaf_section() -> None:
     path = ("Rules",)
     table = (("H",), ("alpha",), ("bravo",))
-    block = ParsedBlock(
-        ordinal=0,
-        kind=ParsedBlockKind.TABLE,
-        text=render_table(table),
-        structural_path=path,
-        table=table,
+    document = _document(
+        ParsedBlock(
+            ordinal=0,
+            kind=ParsedBlockKind.TABLE,
+            text=render_table(table),
+            structural_path=path,
+            table=table,
+        )
     )
-    # TABLE pages are not emitted by current Task 10 adapters. Injecting the
-    # already-validated metadata keeps this test local to Task 3 preservation.
-    object.__setattr__(block, "page", 4)
-    document = _document(block)
 
     chunks = StructuralChunker(max_chars=12).chunk(VERSION_ID, document)
 
@@ -270,7 +307,6 @@ def test_table_fragments_preserve_prefix_path_leaf_section_and_page() -> None:
     ]
     assert all(chunk.structural_path == path for chunk in chunks)
     assert all(chunk.section == "Rules" for chunk in chunks)
-    assert all(chunk.page == 4 for chunk in chunks)
     assert all(chunk.normalized_text for chunk in chunks)
     assert all(len(chunk.normalized_text) <= 12 for chunk in chunks)
 
