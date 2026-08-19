@@ -20,9 +20,12 @@ from services.ingestion import (
 )
 
 _ATX_HEADING = re.compile(r"^(#{1,6})(?:[ \t]+(.*)|[ \t]*)$")
-_SETEXT_HEADING = re.compile(r"^[ \t]*([=-]+)[ \t]*$")
+_SETEXT_HEADING = re.compile(r"^[ \t]*(?:=+|-+)[ \t]*$")
 _TABLE_DELIMITER_CELL = re.compile(r"^:?-{3,}:?$")
 _FENCE_START = re.compile(r"^[ \t]*(`{3,}|~{3,})")
+_HTML_OPENING_TAG = re.compile(
+    r"^[ \t]*<([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>", re.IGNORECASE
+)
 
 
 class MarkdownParser:
@@ -52,6 +55,7 @@ class MarkdownParser:
         paragraph_lines: list[str] = []
         headings: list[str] = []
         fence: str | None = None
+        raw_html_tag: str | None = None
         index = 0
 
         def append_block(
@@ -84,10 +88,24 @@ class MarkdownParser:
                 index += 1
                 continue
 
+            if raw_html_tag is not None:
+                paragraph_lines.append(line)
+                if _contains_html_close(line, raw_html_tag):
+                    raw_html_tag = None
+                index += 1
+                continue
+
             opening_fence = _opening_fence(line)
             if opening_fence is not None:
                 paragraph_lines.append(line)
                 fence = opening_fence
+                index += 1
+                continue
+
+            opening_html = _opening_html_tag(line)
+            if opening_html is not None:
+                paragraph_lines.append(line)
+                raw_html_tag = opening_html
                 index += 1
                 continue
 
@@ -150,10 +168,9 @@ def _atx_heading(line: str) -> tuple[int, str] | None:
 
 
 def _setext_level(line: str) -> int | None:
-    match = _SETEXT_HEADING.match(line)
-    if match is None:
+    if _SETEXT_HEADING.match(line) is None:
         return None
-    return 1 if match.group(1)[0] == "=" else 2
+    return 1 if line.strip()[0] == "=" else 2
 
 
 def _replace_heading(headings: list[str], level: int, heading: str) -> None:
@@ -169,6 +186,21 @@ def _opening_fence(line: str) -> str | None:
 def _is_closing_fence(line: str, opening: str) -> bool:
     marker = re.compile(rf"^[ \t]*{re.escape(opening[0])}{{{len(opening)},}}[ \t]*$")
     return marker.match(line) is not None
+
+
+def _opening_html_tag(line: str) -> str | None:
+    match = _HTML_OPENING_TAG.match(line)
+    if match is None or match.group(0).rstrip().endswith("/>"):
+        return None
+    tag = match.group(1)
+    if _contains_html_close(line, tag):
+        return None
+    return tag
+
+
+def _contains_html_close(line: str, tag: str) -> bool:
+    pattern = rf"</[ \t]*{re.escape(tag)}[ \t]*>"
+    return re.search(pattern, line, re.IGNORECASE) is not None
 
 
 def _is_table_header(header: str, delimiter: str) -> bool:

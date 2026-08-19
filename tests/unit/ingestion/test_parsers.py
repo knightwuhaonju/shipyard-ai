@@ -249,6 +249,30 @@ def test_markdown_parser_recognizes_setext_headings() -> None:
     ]
 
 
+def test_markdown_parser_accepts_uniform_setext_delimiters() -> None:
+    parsed = MarkdownParser().parse(
+        "文档\n===\n\n泵组\n---\n\n检查轴封。".encode()
+    )
+
+    assert [(block.kind, block.structural_path) for block in parsed.blocks] == [
+        (ParsedBlockKind.HEADING, ("文档",)),
+        (ParsedBlockKind.HEADING, ("文档", "泵组")),
+        (ParsedBlockKind.PARAGRAPH, ("文档", "泵组")),
+    ]
+
+
+def test_markdown_parser_keeps_mixed_setext_delimiter_as_paragraph_text() -> None:
+    parsed = MarkdownParser().parse("文档\n===\n\n不是标题\n=-=\n\n## 泵组".encode())
+
+    assert [
+        (block.kind, block.text, block.structural_path) for block in parsed.blocks
+    ] == [
+        (ParsedBlockKind.HEADING, "文档", ("文档",)),
+        (ParsedBlockKind.PARAGRAPH, "不是标题\n=-=", ("文档",)),
+        (ParsedBlockKind.HEADING, "泵组", ("文档", "泵组")),
+    ]
+
+
 def test_markdown_parser_replaces_deeper_path_for_shallower_heading() -> None:
     parsed = MarkdownParser().parse(
         "# 船舶\n\n### 泵组\n\n检查。\n\n## 发电机\n\n复核。".encode()
@@ -280,6 +304,27 @@ def test_markdown_parser_keeps_raw_html_and_fenced_code_as_literal_paragraphs() 
     assert parsed.blocks[1].text == "<h2>原始 HTML</h2>"
     assert parsed.blocks[2].text.startswith("```markdown\n## 不是标题")
     assert parsed.blocks[3].structural_path == ("船舶",)
+
+
+def test_markdown_parser_keeps_multiline_raw_html_as_literal_content() -> None:
+    parsed = MarkdownParser().parse(
+        (
+            "# 船舶\n\n<pre>\n# 必须保持文本\n| 项目 | 数量 |\n"
+            "| --- | --- |\n| 泵 | 2 |\n</pre>\n\n## 实际结构\n\n"
+            "| 项目 | 数量 |\n| --- | --- |\n| 阀 | 4 |"
+        ).encode()
+    )
+
+    assert [(block.kind, block.structural_path) for block in parsed.blocks] == [
+        (ParsedBlockKind.HEADING, ("船舶",)),
+        (ParsedBlockKind.PARAGRAPH, ("船舶",)),
+        (ParsedBlockKind.HEADING, ("船舶", "实际结构")),
+        (ParsedBlockKind.TABLE, ("船舶", "实际结构")),
+    ]
+    assert parsed.blocks[1].text == (
+        "<pre>\n# 必须保持文本\n| 项目 | 数量 |\n| --- | --- |\n| 泵 | 2 |\n</pre>"
+    )
+    assert parsed.blocks[3].table == (("项目", "数量"), ("阀", "4"))
 
 
 def test_markdown_parser_normalizes_ragged_table_rows() -> None:
