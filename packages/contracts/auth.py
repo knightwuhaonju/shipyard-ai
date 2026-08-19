@@ -1,21 +1,15 @@
 """Transport-independent authentication and authorization contracts."""
 
 from collections.abc import Set as AbstractSet
-from enum import IntEnum
 from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from packages.common.security import SecurityLevel
+
+__all__ = ["AuthorizationScope", "SecurityLevel", "UserContext"]
+
 type Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-
-
-class SecurityLevel(IntEnum):
-    """Ordered information-security levels from least to most privileged."""
-
-    PUBLIC = 0
-    INTERNAL = 1
-    CONFIDENTIAL = 2
-    RESTRICTED = 3
 
 
 class _FrozenContract(BaseModel):
