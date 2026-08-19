@@ -1,10 +1,18 @@
 """Tests for the immutable, parser-neutral ingestion contract."""
 
+import socket
+import struct
+import warnings
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
+import services.ingestion.parser as parser_contract
+from adapters.parsers._common import validate_ooxml_archive
+from adapters.parsers.docx import DocxParser
 from adapters.parsers.markdown import MarkdownParser
 from adapters.parsers.text import TxtParser
 from services.ingestion import (
@@ -21,6 +29,10 @@ from services.ingestion import (
     validate_source_bytes,
 )
 from tests.fixtures.parser_documents import (
+    blank_docx_bytes,
+    heading_hierarchy_docx_bytes,
+    merged_table_docx_bytes,
+    synthetic_docx_bytes,
     synthetic_markdown_bytes,
     synthetic_txt_bytes,
 )
@@ -36,6 +48,48 @@ _TEXT_PARSER_FACTORIES: tuple[Callable[[], Parser], ...] = (
     TxtParser,
     MarkdownParser,
 )
+
+
+def _zip_bytes(members: tuple[tuple[str, bytes], ...]) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for name, content in members:
+                archive.writestr(name, content)
+    return output.getvalue()
+
+
+def _zip_with_declared_sizes(
+    *, uncompressed_size: int, compressed_size: int | None = None
+) -> bytes:
+    content = bytearray(_zip_bytes((("word/document.xml", b"x"),)))
+    central_directory = content.index(b"PK\x01\x02")
+    if compressed_size is not None:
+        struct.pack_into("<I", content, central_directory + 20, compressed_size)
+    struct.pack_into("<I", content, central_directory + 24, uncompressed_size)
+    return bytes(content)
+
+
+def _docx_with_external_relationship() -> bytes:
+    source = BytesIO(synthetic_docx_bytes())
+    output = BytesIO()
+    relationship = (
+        b'<Relationship Id="rExternal" '
+        b'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+        b'relationships/hyperlink" Target="https://example.invalid/drawing" '
+        b'TargetMode="External"/>'
+    )
+    relationship_path = "word/_rels/document.xml.rels"
+    with ZipFile(source) as source_archive, ZipFile(output, "w") as target_archive:
+        for member in source_archive.infolist():
+            content = source_archive.read(member)
+            if member.filename == relationship_path:
+                content = content.replace(
+                    b"</Relationships>", relationship + b"</Relationships>"
+                )
+            target_archive.writestr(member, content)
+    return output.getvalue()
 
 
 def _assert_parser_error(
@@ -235,6 +289,150 @@ def test_markdown_parser_preserves_heading_path_and_whole_table() -> None:
     assert parsed.blocks[-1].kind is ParsedBlockKind.TABLE
     assert parsed.blocks[-1].structural_path == ("合成规范", "泵组")
     assert parsed.blocks[-1].table == (("项目", "数量"), ("泵", "2"))
+
+
+def test_docx_parser_preserves_body_order_hierarchy_and_table() -> None:
+    parsed = DocxParser().parse(synthetic_docx_bytes())
+
+    assert parsed.format is DocumentFormat.DOCX
+    assert [block.kind for block in parsed.blocks] == [
+        ParsedBlockKind.TITLE,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.PARAGRAPH,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.TABLE,
+    ]
+    assert [block.ordinal for block in parsed.blocks] == list(range(5))
+    assert parsed.blocks[-1].structural_path == (
+        "合成船级规则",
+        "机械系统",
+        "泵组",
+    )
+    assert parsed.blocks[-1].table == (("检查项", "结果"), ("轴封", "合格"))
+
+
+def test_docx_parser_keeps_title_as_root_and_replaces_shallower_headings() -> None:
+    parsed = DocxParser().parse(heading_hierarchy_docx_bytes())
+
+    assert [block.kind for block in parsed.blocks] == [
+        ParsedBlockKind.TITLE,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.PARAGRAPH,
+    ]
+    assert [block.structural_path for block in parsed.blocks] == [
+        ("根标题",),
+        ("根标题", "初始系统"),
+        ("根标题", "初始系统", "初始设备"),
+        ("根标题", "替换系统"),
+        ("根标题", "替换系统", "九级主题"),
+        ("根标题", "替换系统", "八级替换"),
+        ("根标题", "替换系统", "八级替换"),
+    ]
+
+
+def test_docx_parser_represents_merged_cells_once_in_rectangular_table() -> None:
+    parsed = DocxParser().parse(merged_table_docx_bytes())
+
+    assert parsed.blocks[0].table == (("检查项", ""), ("轴封", "合格"))
+
+
+def test_ooxml_preflight_rejects_invalid_archive_with_safe_typed_error() -> None:
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(b"not a ZIP archive")
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        (("word/document.xml", b"first"), ("word/document.xml", b"second")),
+        (("word/document.xml", b"first"), ("word\\document.xml", b"second")),
+    ],
+)
+def test_ooxml_preflight_rejects_duplicate_normalized_names(
+    members: tuple[tuple[str, bytes], ...],
+) -> None:
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(_zip_bytes(members))
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize("name", ["/absolute.xml", "../escape.xml", "..\\escape.xml"])
+def test_ooxml_preflight_rejects_absolute_and_traversal_paths(name: str) -> None:
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(_zip_bytes(((name, b"unsafe"),)))
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+def test_ooxml_preflight_rejects_too_many_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parser_contract, "MAX_ARCHIVE_ENTRIES", 1)
+
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(_zip_bytes((("one.xml", b"1"), ("two.xml", b"2"))))
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_ooxml_preflight_rejects_declared_uncompressed_total_over_limit() -> None:
+    content = _zip_with_declared_sizes(
+        uncompressed_size=parser_contract.MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1
+    )
+
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(content)
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_ooxml_preflight_rejects_declared_compression_ratio_over_limit() -> None:
+    content = _zip_with_declared_sizes(
+        uncompressed_size=parser_contract.MAX_ARCHIVE_COMPRESSION_RATIO + 1,
+        compressed_size=1,
+    )
+
+    with pytest.raises(ParserError) as raised:
+        validate_ooxml_archive(content)
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+def test_docx_parser_translates_malformed_package_to_safe_typed_error() -> None:
+    malformed = _zip_bytes((("[Content_Types].xml", b"<broken"),))
+
+    with pytest.raises(ParserError) as raised:
+        DocxParser().parse(malformed)
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+def test_docx_parser_rejects_blank_paragraphs_and_tables_as_empty() -> None:
+    with pytest.raises(ParserError) as raised:
+        DocxParser().parse(blank_docx_bytes())
+
+    _assert_parser_error(raised, ParserErrorCode.EMPTY_DOCUMENT)
+
+
+def test_docx_parser_does_not_follow_http_relationships(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_network(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("DOCX parser attempted outbound network access")
+
+    monkeypatch.setattr(socket.socket, "connect", fail_network)
+    monkeypatch.setattr(socket, "create_connection", fail_network)
+
+    parsed = DocxParser().parse(_docx_with_external_relationship())
+
+    assert parsed.blocks[0].text == "合成船级规则"
 
 
 def test_markdown_parser_recognizes_setext_headings() -> None:
