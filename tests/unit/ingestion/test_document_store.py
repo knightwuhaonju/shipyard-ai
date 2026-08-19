@@ -349,6 +349,33 @@ def test_register_version_rejects_occupied_version_id_with_new_checksum() -> Non
     assert store.list_versions(DOCUMENT_ID) == (original,)
 
 
+def test_register_version_rejects_checksum_retry_with_occupied_version_id() -> None:
+    repository = _MemoryDocumentRepository()
+    store = DocumentStore(repository)
+    store.register_document(_document())
+    checksum_winner = store.register_version(_version())
+    id_occupier = store.register_version(
+        replace(
+            checksum_winner,
+            version_id=VERSION_B_ID,
+            checksum="b" * 64,
+            source_uri="s3://synthetic-documents/rule-b.pdf",
+        )
+    )
+    stored_before = store.list_versions(DOCUMENT_ID)
+    writes_before = repository.version_writes
+    proposed = replace(checksum_winner, version_id=id_occupier.version_id)
+
+    with pytest.raises(
+        DocumentVersionConflictError,
+        match="^document version metadata conflicts$",
+    ):
+        store.register_version(proposed)
+
+    assert repository.version_writes == writes_before
+    assert store.list_versions(DOCUMENT_ID) == stored_before
+
+
 def test_register_version_requires_document_without_writing() -> None:
     repository = _MemoryDocumentRepository()
     store = DocumentStore(repository)

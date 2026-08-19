@@ -102,7 +102,10 @@ class DocumentStore:
             version.document_id, version.checksum
         )
         if by_checksum is not None:
-            if self._version_payload(by_checksum) == self._version_payload(version):
+            if (
+                self._version_payload(by_checksum) == self._version_payload(version)
+                and (by_id is None or by_id == by_checksum)
+            ):
                 return by_checksum
             raise DocumentVersionConflictError("document version metadata conflicts")
         if by_id is not None:
