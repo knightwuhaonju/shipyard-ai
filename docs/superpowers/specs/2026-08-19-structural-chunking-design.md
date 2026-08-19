@@ -141,9 +141,11 @@ The full immutable tuple remains in `DocumentChunk.structural_path`. The
 `section` field is the last, most specific path element, or `None` for an empty
 path.
 
-If a title or heading has no body content before the context changes or the
-document ends, the chunker emits one heading-only chunk so source content is
-not lost.
+If a title or heading's entire subtree has no body or table content before the
+parser leaves that subtree or the document ends, the chunker emits one
+heading-only chunk so source content is not lost. Body under a descendant path
+covers every ancestor marker; a chapter with populated subsections therefore
+does not create a separate low-value chapter chunk.
 
 If the complete textual prefix alone leaves no room for body content under
 `max_chars`, the prefix is omitted from `normalized_text` for that chunk. The
