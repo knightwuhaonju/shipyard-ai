@@ -1,14 +1,18 @@
 """Tests for the immutable, parser-neutral ingestion contract."""
 
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 
 import pytest
 
+from adapters.parsers.markdown import MarkdownParser
+from adapters.parsers.text import TxtParser
 from services.ingestion import (
     DocumentFormat,
     ParsedBlock,
     ParsedBlockKind,
     ParsedDocument,
+    Parser,
     ParserError,
     ParserErrorCode,
     normalize_block_text,
@@ -16,6 +20,29 @@ from services.ingestion import (
     render_table,
     validate_source_bytes,
 )
+from tests.fixtures.parser_documents import (
+    synthetic_markdown_bytes,
+    synthetic_txt_bytes,
+)
+
+_PARSER_ERROR_MESSAGES = {
+    ParserErrorCode.INVALID_DOCUMENT: "document cannot be parsed",
+    ParserErrorCode.UNSUPPORTED_ENCODING: "document text encoding is unsupported",
+    ParserErrorCode.RESOURCE_LIMIT: "document exceeds parser resource limits",
+    ParserErrorCode.EMPTY_DOCUMENT: "document contains no parseable content",
+}
+
+_TEXT_PARSER_FACTORIES: tuple[Callable[[], Parser], ...] = (
+    TxtParser,
+    MarkdownParser,
+)
+
+
+def _assert_parser_error(
+    raised: pytest.ExceptionInfo[ParserError], code: ParserErrorCode
+) -> None:
+    assert raised.value.code is code
+    assert str(raised.value) == _PARSER_ERROR_MESSAGES[code]
 
 
 def _paragraph(**changes: object) -> ParsedBlock:
@@ -188,3 +215,156 @@ def test_validate_source_bytes_rejects_invalid_empty_and_oversized_content(
     with pytest.raises(ParserError) as oversized:
         validate_source_bytes(b"abc")
     assert oversized.value.code is ParserErrorCode.RESOURCE_LIMIT
+
+
+def test_txt_parser_returns_common_paragraph_blocks() -> None:
+    parsed = TxtParser().parse(synthetic_txt_bytes())
+
+    assert parsed.format is DocumentFormat.TXT
+    assert [block.kind for block in parsed.blocks] == [
+        ParsedBlockKind.PARAGRAPH,
+        ParsedBlockKind.PARAGRAPH,
+    ]
+    assert parsed.blocks[1].text == "泵组检查。\n第二行。"
+
+
+def test_markdown_parser_preserves_heading_path_and_whole_table() -> None:
+    parsed = MarkdownParser().parse(synthetic_markdown_bytes())
+
+    assert [block.ordinal for block in parsed.blocks] == list(range(len(parsed.blocks)))
+    assert parsed.blocks[-1].kind is ParsedBlockKind.TABLE
+    assert parsed.blocks[-1].structural_path == ("合成规范", "泵组")
+    assert parsed.blocks[-1].table == (("项目", "数量"), ("泵", "2"))
+
+
+def test_markdown_parser_recognizes_setext_headings() -> None:
+    parsed = MarkdownParser().parse(
+        "合成规范\n====\n\n泵组\n----\n\n检查轴封。".encode()
+    )
+
+    assert [(block.kind, block.structural_path) for block in parsed.blocks] == [
+        (ParsedBlockKind.HEADING, ("合成规范",)),
+        (ParsedBlockKind.HEADING, ("合成规范", "泵组")),
+        (ParsedBlockKind.PARAGRAPH, ("合成规范", "泵组")),
+    ]
+
+
+def test_markdown_parser_replaces_deeper_path_for_shallower_heading() -> None:
+    parsed = MarkdownParser().parse(
+        "# 船舶\n\n### 泵组\n\n检查。\n\n## 发电机\n\n复核。".encode()
+    )
+
+    assert [block.structural_path for block in parsed.blocks] == [
+        ("船舶",),
+        ("船舶", "泵组"),
+        ("船舶", "泵组"),
+        ("船舶", "发电机"),
+        ("船舶", "发电机"),
+    ]
+
+
+def test_markdown_parser_keeps_raw_html_and_fenced_code_as_literal_paragraphs() -> None:
+    parsed = MarkdownParser().parse(
+        (
+            "# 船舶\n\n<h2>原始 HTML</h2>\n\n```markdown\n## 不是标题\n"
+            "| 项目 | 数量 |\n| --- | --- |\n| 泵 | 2 |\n```\n\n结束。"
+        ).encode()
+    )
+
+    assert [block.kind for block in parsed.blocks] == [
+        ParsedBlockKind.HEADING,
+        ParsedBlockKind.PARAGRAPH,
+        ParsedBlockKind.PARAGRAPH,
+        ParsedBlockKind.PARAGRAPH,
+    ]
+    assert parsed.blocks[1].text == "<h2>原始 HTML</h2>"
+    assert parsed.blocks[2].text.startswith("```markdown\n## 不是标题")
+    assert parsed.blocks[3].structural_path == ("船舶",)
+
+
+def test_markdown_parser_normalizes_ragged_table_rows() -> None:
+    parsed = MarkdownParser().parse(
+        (
+            "| 项目 | 数量 | 备注 |\n| :--- | ---: | :---: |\n"
+            "| 泵 | 2 |\n| 阀 | 4 | 已验收 |"
+        ).encode()
+    )
+
+    assert parsed.blocks[0].table == (
+        ("项目", "数量", "备注"),
+        ("泵", "2", ""),
+        ("阀", "4", "已验收"),
+    )
+
+
+def test_markdown_parser_rejects_a_row_wider_than_the_column_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("services.ingestion.parser.MAX_TABLE_COLUMNS", 2)
+
+    with pytest.raises(ParserError) as raised:
+        MarkdownParser().parse(b"| item | qty |\n| --- | --- |\n| pump | 2 | extra |")
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
+
+
+@pytest.mark.parametrize("parser_factory", _TEXT_PARSER_FACTORIES)
+def test_text_parsers_accept_utf8_bom(
+    parser_factory: Callable[[], Parser],
+) -> None:
+    parser = parser_factory()
+
+    parsed = parser.parse("\ufeff泵组检查。".encode())
+
+    assert parsed.blocks[0].text == "泵组检查。"
+
+
+@pytest.mark.parametrize("parser_factory", _TEXT_PARSER_FACTORIES)
+def test_text_parsers_reject_invalid_utf8_with_safe_typed_error(
+    parser_factory: Callable[[], Parser],
+) -> None:
+    with pytest.raises(ParserError) as raised:
+        parser_factory().parse(b"\xff")
+
+    _assert_parser_error(raised, ParserErrorCode.UNSUPPORTED_ENCODING)
+
+
+@pytest.mark.parametrize("parser_factory", _TEXT_PARSER_FACTORIES)
+def test_text_parsers_reject_nul_with_safe_typed_error(
+    parser_factory: Callable[[], Parser],
+) -> None:
+    with pytest.raises(ParserError) as raised:
+        parser_factory().parse("泵\x00组".encode())
+
+    _assert_parser_error(raised, ParserErrorCode.INVALID_DOCUMENT)
+
+
+@pytest.mark.parametrize("parser_factory", _TEXT_PARSER_FACTORIES)
+def test_text_parsers_reject_all_blank_input_with_safe_typed_error(
+    parser_factory: Callable[[], Parser],
+) -> None:
+    with pytest.raises(ParserError) as raised:
+        parser_factory().parse(b" \r\n\t\n")
+
+    _assert_parser_error(raised, ParserErrorCode.EMPTY_DOCUMENT)
+
+
+def test_txt_parser_accepts_exact_source_size_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("services.ingestion.parser.MAX_SOURCE_BYTES", 4)
+
+    parsed = TxtParser().parse(b"pump")
+
+    assert parsed.blocks[0].text == "pump"
+
+
+def test_txt_parser_rejects_oversized_block_with_safe_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("services.ingestion.parser.MAX_BLOCK_CHARS", 3)
+
+    with pytest.raises(ParserError) as raised:
+        TxtParser().parse(b"pump")
+
+    _assert_parser_error(raised, ParserErrorCode.RESOURCE_LIMIT)
