@@ -26,6 +26,63 @@ _FENCE_START = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _HTML_OPENING_TAG = re.compile(
     r"^[ \t]*<([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>", re.IGNORECASE
 )
+_MULTILINE_RAW_HTML_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "audio",
+        "blockquote",
+        "body",
+        "canvas",
+        "caption",
+        "center",
+        "colgroup",
+        "dd",
+        "details",
+        "dialog",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "head",
+        "header",
+        "hgroup",
+        "html",
+        "iframe",
+        "legend",
+        "li",
+        "main",
+        "menu",
+        "nav",
+        "noscript",
+        "ol",
+        "optgroup",
+        "option",
+        "p",
+        "picture",
+        "pre",
+        "script",
+        "section",
+        "style",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "template",
+        "textarea",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "ul",
+        "video",
+    }
+)
 
 
 class MarkdownParser:
@@ -192,7 +249,9 @@ def _opening_html_tag(line: str) -> str | None:
     match = _HTML_OPENING_TAG.match(line)
     if match is None or match.group(0).rstrip().endswith("/>"):
         return None
-    tag = match.group(1)
+    tag = match.group(1).lower()
+    if tag not in _MULTILINE_RAW_HTML_TAGS:
+        return None
     if _contains_html_close(line, tag):
         return None
     return tag

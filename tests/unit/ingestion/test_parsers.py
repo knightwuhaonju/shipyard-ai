@@ -327,6 +327,37 @@ def test_markdown_parser_keeps_multiline_raw_html_as_literal_content() -> None:
     assert parsed.blocks[3].table == (("项目", "数量"), ("阀", "4"))
 
 
+@pytest.mark.parametrize(
+    ("tag", "heading"),
+    [
+        ("<br>", "resumes"),
+        ('<img alt="drawing" src="drawing.png">', "image resumes"),
+    ],
+)
+def test_markdown_parser_does_not_open_multiline_state_for_void_html_tags(
+    tag: str, heading: str
+) -> None:
+    parsed = MarkdownParser().parse(f"{tag}\n\n# {heading}".encode())
+
+    assert [
+        (block.kind, block.text, block.structural_path) for block in parsed.blocks
+    ] == [
+        (ParsedBlockKind.PARAGRAPH, tag, ()),
+        (ParsedBlockKind.HEADING, heading, (heading,)),
+    ]
+
+
+def test_markdown_parser_keeps_inline_html_literal_and_heading() -> None:
+    parsed = MarkdownParser().parse(b"<span>literal</span>\n\n# resumes")
+
+    assert [
+        (block.kind, block.text, block.structural_path) for block in parsed.blocks
+    ] == [
+        (ParsedBlockKind.PARAGRAPH, "<span>literal</span>", ()),
+        (ParsedBlockKind.HEADING, "resumes", ("resumes",)),
+    ]
+
+
 def test_markdown_parser_normalizes_ragged_table_rows() -> None:
     parsed = MarkdownParser().parse(
         (
