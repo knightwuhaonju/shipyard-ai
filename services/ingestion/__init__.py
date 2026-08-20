@@ -12,6 +12,7 @@ from services.ingestion.document_store import (
     DocumentVersionConflictError,
     DocumentVersionNotFoundError,
 )
+from services.ingestion.ocr import OcrPage, OcrPort
 from services.ingestion.parser import (
     DocumentFormat,
     ParsedBlock,
@@ -51,4 +52,6 @@ __all__ = [
     "normalize_table_cell",
     "render_table",
     "validate_source_bytes",
+    "OcrPage",
+    "OcrPort",
 ]
