@@ -259,3 +259,86 @@ def test_lexical_import_guard_rejects_nested_and_disallowed_contract_imports(
     malicious_source: str,
 ) -> None:
     assert not _source_uses_only_allowed_retrieval_imports(malicious_source)
+
+
+def _is_allowed_postgres_lexical_import(node: ast.Import | ast.ImportFrom) -> bool:
+    if isinstance(node, ast.Import):
+        return False
+    allowed_symbols = {
+        "__future__": {"annotations"},
+        "collections.abc": {"Iterable"},
+        "uuid": {"UUID"},
+        "sqlalchemy": {
+            "bindparam",
+            "func",
+            "literal_column",
+            "or_",
+            "select",
+            "text",
+        },
+        "sqlalchemy.engine": {"Engine"},
+        "sqlalchemy.exc": {"SQLAlchemyError"},
+        "sqlalchemy.orm": {"Session"},
+        "sqlalchemy.sql.elements": {"ColumnClause"},
+        "infra.postgres.document_models": {
+            "DocumentChunkModel",
+            "DocumentModel",
+            "DocumentVersionModel",
+        },
+        "packages.contracts": {
+            "AuthorizationScope",
+            "KnowledgeEvidence",
+            "KnowledgeFilters",
+        },
+        "services.retrieval.lexical": {
+            "LexicalRetrievalError",
+            "LexicalSearchPort",
+        },
+    }
+    if node.level != 0 or node.module not in allowed_symbols:
+        return False
+    return all(
+        alias.asname is None and alias.name in allowed_symbols[node.module]
+        for alias in node.names
+    )
+
+
+def _source_uses_only_allowed_postgres_lexical_imports(source: str) -> bool:
+    return all(
+        _is_allowed_postgres_lexical_import(node)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import | ast.ImportFrom)
+    )
+
+
+def test_postgres_lexical_adapter_import_boundary_is_deny_by_default() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "infra/postgres/lexical_retrieval.py"
+    ).read_text(encoding="utf-8")
+
+    assert _source_uses_only_allowed_postgres_lexical_imports(source)
+
+
+@pytest.mark.parametrize(
+    "malicious_source",
+    [
+        "from services.ingestion import Parser\n",
+        "from adapters.embedding import EmbeddingAdapter\n",
+        "from services.retrieval.vector import VectorRetriever\n",
+        "from services.retrieval.hybrid import HybridRetriever\n",
+        "from services.retrieval.reranker import Reranker\n",
+        "from services.wiki import WikiSearch\n",
+        "from services.agent import ShipyardAgent\n",
+        "from apps.api import app\n",
+        "from adapters.erp import ErpAdapter\n",
+        "from packages.contracts import UserContext\n",
+        "from infra.postgres import DocumentModel\n",
+        "from .document_models import DocumentModel\n",
+        "import sqlalchemy\n",
+    ],
+)
+def test_postgres_lexical_import_guard_rejects_unapproved_dependencies(
+    malicious_source: str,
+) -> None:
+    assert not _source_uses_only_allowed_postgres_lexical_imports(malicious_source)

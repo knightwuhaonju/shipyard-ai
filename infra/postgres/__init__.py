@@ -7,6 +7,7 @@ from infra.postgres.document_models import (
     DocumentVersionModel,
 )
 from infra.postgres.document_repository import PostgresDocumentRepository
+from infra.postgres.lexical_retrieval import PostgresLexicalSearchAdapter
 from infra.postgres.models import Base
 from infra.postgres.repositories import (
     DomainPersistenceError,
@@ -24,5 +25,6 @@ __all__ = [
     "DomainPersistenceError",
     "DomainRepository",
     "PostgresDocumentRepository",
+    "PostgresLexicalSearchAdapter",
     "UnsupportedDomainEntityError",
 ]
