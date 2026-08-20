@@ -434,6 +434,7 @@ git commit -m "feat: define lexical retrieval contracts"
 **Files:**
 - Create: `infra/postgres/lexical_retrieval.py`
 - Modify: `infra/postgres/__init__.py`
+- Modify: `tests/unit/retrieval/test_lexical_contracts.py`
 - Create: `tests/integration/retrieval/__init__.py`
 - Create: `tests/integration/retrieval/test_lexical_acl.py`
 
