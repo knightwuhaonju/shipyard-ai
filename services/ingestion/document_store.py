@@ -174,6 +174,7 @@ class DocumentStore:
             version.document_id,
             version.checksum,
             version.source_uri,
+            version.document_type,
             version.source_updated_at,
             version.security_level,
             version.ship_id,

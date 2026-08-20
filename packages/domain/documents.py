@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid5
 
+from packages.common.document_types import DocumentType
 from packages.common.security import SecurityLevel
 
 _CHUNK_ID_NAMESPACE = UUID("90f13714-cfb7-5871-a2ef-92c413d6e55e")
@@ -105,6 +106,7 @@ class DocumentVersion:
     document_id: UUID
     checksum: str
     source_uri: str
+    document_type: DocumentType
     source_updated_at: datetime
     security_level: SecurityLevel
     ship_id: UUID | None = None
@@ -120,6 +122,8 @@ class DocumentVersion:
         ):
             raise DocumentValidationError("checksum must be lowercase SHA-256 text")
         _require_text("source_uri", self.source_uri)
+        if not isinstance(self.document_type, DocumentType):
+            raise DocumentValidationError("document_type must be a DocumentType")
         _require_timezone_aware("source_updated_at", self.source_updated_at)
         if not isinstance(self.security_level, SecurityLevel):
             raise DocumentValidationError("security_level must be a SecurityLevel")

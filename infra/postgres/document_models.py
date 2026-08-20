@@ -8,10 +8,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -63,6 +65,10 @@ class DocumentVersionModel(Base):
             name="ck_document_versions_source_uri",
         ),
         CheckConstraint(
+            "document_type IN ('pdf', 'docx', 'xlsx', 'txt', 'markdown')",
+            name="ck_document_versions_document_type",
+        ),
+        CheckConstraint(
             "security_level BETWEEN 0 AND 3",
             name="ck_document_versions_security_level",
         ),
@@ -85,6 +91,7 @@ class DocumentVersionModel(Base):
     )
     checksum: Mapped[str] = mapped_column(Text, nullable=False)
     source_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    document_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     source_updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -128,6 +135,17 @@ class DocumentChunkModel(Base):
         CheckConstraint(
             "section IS NULL OR btrim(section) <> ''",
             name="ck_document_chunks_section",
+        ),
+        Index(
+            "ix_document_chunks_lexical_tsv",
+            text("to_tsvector('simple'::regconfig, normalized_text)"),
+            postgresql_using="gin",
+        ),
+        Index(
+            "ix_document_chunks_normalized_text_trgm",
+            "normalized_text",
+            postgresql_using="gin",
+            postgresql_ops={"normalized_text": "gin_trgm_ops"},
         ),
     )
 

@@ -11,7 +11,7 @@ from infra.postgres.document_models import (
     DocumentModel,
     DocumentVersionModel,
 )
-from packages.common import SecurityLevel
+from packages.common import DocumentType, SecurityLevel
 from packages.domain import (
     Document,
     DocumentChunk,
@@ -39,6 +39,7 @@ def _to_version_model(version: DocumentVersion) -> DocumentVersionModel:
         document_id=version.document_id,
         checksum=version.checksum,
         source_uri=version.source_uri,
+        document_type=version.document_type.value,
         source_updated_at=version.source_updated_at,
         security_level=version.security_level.value,
         ship_id=version.ship_id,
@@ -78,6 +79,7 @@ def _to_version(model: DocumentVersionModel) -> DocumentVersion:
             document_id=model.document_id,
             checksum=model.checksum,
             source_uri=model.source_uri,
+            document_type=DocumentType(model.document_type),
             source_updated_at=model.source_updated_at,
             security_level=SecurityLevel(model.security_level),
             ship_id=model.ship_id,

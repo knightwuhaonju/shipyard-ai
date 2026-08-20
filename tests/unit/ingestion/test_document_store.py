@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from packages.common import SecurityLevel
+from packages.common import DocumentType, SecurityLevel
 from packages.domain import Document, DocumentChunk, DocumentVersion, document_chunk_id
 from services.ingestion.document_store import (
     DocumentChunkConflictError,
@@ -142,6 +142,7 @@ def _version(**changes: object) -> DocumentVersion:
         "document_id": DOCUMENT_ID,
         "checksum": "a" * 64,
         "source_uri": "s3://synthetic-documents/rule-a.pdf",
+        "document_type": DocumentType.PDF,
         "source_updated_at": UPDATED_AT,
         "security_level": SecurityLevel.INTERNAL,
         "ship_id": SHIP_ID,
@@ -182,6 +183,27 @@ def test_register_version_is_idempotent_and_preserves_immutable_record() -> None
     assert store.register_version(original) == original
     assert store.register_version(retry) == original
     assert store.list_versions(document.document_id) == (original,)
+
+
+def test_register_version_rejects_document_type_change_for_checksum_retry() -> None:
+    repository = _MemoryDocumentRepository()
+    store = DocumentStore(repository)
+    store.register_document(_document())
+    original = store.register_version(_version())
+
+    with pytest.raises(
+        DocumentVersionConflictError,
+        match="^document version metadata conflicts$",
+    ):
+        store.register_version(
+            replace(
+                original,
+                version_id=VERSION_RETRY_ID,
+                document_type=DocumentType.DOCX,
+            )
+        )
+
+    assert store.list_versions(DOCUMENT_ID) == (original,)
 
 
 def test_versions_with_different_checksums_coexist() -> None:

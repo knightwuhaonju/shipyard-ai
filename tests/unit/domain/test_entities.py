@@ -591,6 +591,7 @@ def _assert_domain_imports_allowed(domain_root: Path) -> None:
             module_name.split(".", 1)[0] in sys.stdlib_module_names
             or module_name == "packages.domain"
             or module_name.startswith("packages.domain.")
+            or module_name == "packages.common.document_types"
             or module_name == "packages.common.security"
         )
 

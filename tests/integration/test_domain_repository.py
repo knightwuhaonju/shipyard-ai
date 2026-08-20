@@ -250,7 +250,7 @@ def test_migration_upgrades_an_empty_postgresql_database() -> None:
                 connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
-                == "20260819_0003"
+                == "20260820_0004"
             )
     finally:
         engine.dispose()

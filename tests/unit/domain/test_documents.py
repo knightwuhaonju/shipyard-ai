@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 
+from packages.common import DocumentType
 from packages.common import SecurityLevel as CommonSecurityLevel
 from packages.contracts import SecurityLevel as ContractSecurityLevel
 from packages.domain import (
@@ -37,6 +38,7 @@ def _version(**changes: object) -> DocumentVersion:
         "document_id": DOCUMENT_ID,
         "checksum": "a" * 64,
         "source_uri": "s3://synthetic-documents/rule-a.pdf",
+        "document_type": DocumentType.PDF,
         "source_updated_at": UPDATED_AT,
         "security_level": CommonSecurityLevel.INTERNAL,
         "ship_id": UUID("90000000-0000-0000-0000-000000000003"),
@@ -68,6 +70,26 @@ def _chunk(**changes: object) -> DocumentChunk:
 def test_security_level_is_one_shared_framework_independent_type() -> None:
     assert CommonSecurityLevel is ContractSecurityLevel
     assert [level.value for level in CommonSecurityLevel] == [0, 1, 2, 3]
+
+
+def test_document_type_has_the_exact_v1_values() -> None:
+    assert [(item.name, item.value) for item in DocumentType] == [
+        ("PDF", "pdf"),
+        ("DOCX", "docx"),
+        ("XLSX", "xlsx"),
+        ("TXT", "txt"),
+        ("MARKDOWN", "markdown"),
+    ]
+
+
+def test_document_version_requires_an_exact_document_type() -> None:
+    version = _version(document_type=DocumentType.PDF)
+    assert version.document_type is DocumentType.PDF
+    with pytest.raises(
+        DocumentValidationError,
+        match="^document_type must be a DocumentType$",
+    ):
+        _version(document_type="pdf")
 
 
 def test_document_is_immutable_and_preserves_external_identity() -> None:

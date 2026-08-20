@@ -8,11 +8,13 @@ from typing import cast
 from uuid import UUID
 
 import pytest
+from alembic import command
 from sqlalchemy import (
     CheckConstraint,
     ForeignKeyConstraint,
     Index,
     UniqueConstraint,
+    create_engine,
     inspect,
     literal,
     select,
@@ -29,7 +31,7 @@ from infra.postgres import (
     DomainRepository,
     PostgresDocumentRepository,
 )
-from packages.common import SecurityLevel
+from packages.common import DocumentType, SecurityLevel
 from packages.domain import (
     Document,
     DocumentChunk,
@@ -41,6 +43,11 @@ from services.ingestion import (
     DocumentRepositoryError,
     DocumentStore,
     DocumentVersionConflictError,
+)
+from tests.integration.postgres_support import (
+    alembic_config,
+    configured_test_database_url,
+    downgrade_to_base,
 )
 
 DOCUMENT_ID = UUID("91000000-0000-0000-0000-000000000001")
@@ -82,6 +89,7 @@ def _version(**changes: object) -> DocumentVersion:
         "document_id": DOCUMENT_ID,
         "checksum": "a" * 64,
         "source_uri": "s3://synthetic-documents/rule-a.pdf",
+        "document_type": DocumentType.PDF,
         "source_updated_at": UPDATED_AT,
         "security_level": SecurityLevel.INTERNAL,
         "ship_id": SHIP_ID,
@@ -170,12 +178,14 @@ def _invalid_persistence_model(case: str) -> DocumentPersistenceModel:
             "version_source_uri": "92000000-0000-0000-0000-000000000006",
             "version_security_level": "92000000-0000-0000-0000-000000000007",
             "version_department": "92000000-0000-0000-0000-000000000008",
-            "chunk_null_path_element": "92000000-0000-0000-0000-000000000009",
-            "chunk_empty_path_element": "92000000-0000-0000-0000-000000000010",
-            "chunk_ordinal": "92000000-0000-0000-0000-000000000011",
-            "chunk_text": "92000000-0000-0000-0000-000000000012",
-            "chunk_page": "92000000-0000-0000-0000-000000000013",
-            "chunk_section": "92000000-0000-0000-0000-000000000014",
+            "version_document_type_invalid": "92000000-0000-0000-0000-000000000009",
+            "version_document_type_null": "92000000-0000-0000-0000-000000000010",
+            "chunk_null_path_element": "92000000-0000-0000-0000-000000000011",
+            "chunk_empty_path_element": "92000000-0000-0000-0000-000000000012",
+            "chunk_ordinal": "92000000-0000-0000-0000-000000000013",
+            "chunk_text": "92000000-0000-0000-0000-000000000014",
+            "chunk_page": "92000000-0000-0000-0000-000000000015",
+            "chunk_section": "92000000-0000-0000-0000-000000000016",
         }[case]
     )
     if case.startswith("document_"):
@@ -194,6 +204,10 @@ def _invalid_persistence_model(case: str) -> DocumentPersistenceModel:
                 "version_malformed_checksum": "a" * 63,
             }.get(case, "c" * 64),
             source_uri=" " if case == "version_source_uri" else "synthetic://rule",
+            document_type={
+                "version_document_type_invalid": "pdfx",
+                "version_document_type_null": None,
+            }.get(case, DocumentType.PDF.value),
             source_updated_at=UPDATED_AT,
             security_level=4 if case == "version_security_level" else 1,
             ship_id=SHIP_ID,
@@ -232,6 +246,7 @@ def test_document_metadata_declares_version_and_chunk_constraints() -> None:
         "document_id",
         "checksum",
         "source_uri",
+        "document_type",
         "source_updated_at",
         "security_level",
         "ship_id",
@@ -265,6 +280,7 @@ def test_document_metadata_declares_version_and_chunk_constraints() -> None:
         "document_versions": {
             "ck_document_versions_checksum",
             "ck_document_versions_source_uri",
+            "ck_document_versions_document_type",
             "ck_document_versions_security_level",
             "ck_document_versions_department",
         },
@@ -288,6 +304,7 @@ def test_document_metadata_declares_version_and_chunk_constraints() -> None:
     expected_indexes = {
         "document_versions": {
             "ix_document_versions_document_id",
+            "ix_document_versions_document_type",
             "ix_document_versions_ship_id",
             "ix_document_versions_project_id",
             "ix_document_versions_department",
@@ -296,6 +313,8 @@ def test_document_metadata_declares_version_and_chunk_constraints() -> None:
         "document_chunks": {
             "ix_document_chunks_version_id",
             "ix_document_chunks_page",
+            "ix_document_chunks_lexical_tsv",
+            "ix_document_chunks_normalized_text_trgm",
         },
     }
 
@@ -595,6 +614,8 @@ def test_corrupt_nondeterministic_chunk_id_fails_safe_reconstruction(
         "version_uppercase_checksum",
         "version_malformed_checksum",
         "version_source_uri",
+        "version_document_type_invalid",
+        "version_document_type_null",
         "version_security_level",
         "version_department",
         "chunk_null_path_element",
@@ -719,5 +740,160 @@ def test_document_migration_is_current_head(migrated_engine: Engine) -> None:
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "20260819_0003"
+            == "20260820_0004"
         )
+        assert connection.execute(
+            text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")
+        ).scalar_one()
+        assert {
+            row.indexname
+            for row in connection.execute(
+                text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE schemaname = current_schema() "
+                    "AND tablename IN ('document_versions', 'document_chunks')"
+                )
+            )
+        } >= {
+            "ix_document_versions_document_type",
+            "ix_document_chunks_lexical_tsv",
+            "ix_document_chunks_normalized_text_trgm",
+        }
+
+
+def test_document_type_migration_backfills_recognized_legacy_suffixes() -> None:
+    url = configured_test_database_url()
+    config = alembic_config(url)
+    engine = create_engine(url)
+    try:
+        downgrade_to_base(config)
+        command.upgrade(config, "20260819_0003")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO documents "
+                    "(document_id, source_system, source_id, title) "
+                    "VALUES (:document_id, 'synthetic-plm', 'legacy-rule', "
+                    "'Synthetic legacy rule')"
+                ),
+                {"document_id": DOCUMENT_ID},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO document_versions "
+                    "(version_id, document_id, checksum, source_uri, "
+                    "source_updated_at, security_level) VALUES "
+                    "(:pdf_id, :document_id, :pdf_checksum, :pdf_uri, :updated_at, 0), "
+                    "(:markdown_id, :document_id, :markdown_checksum, "
+                    ":markdown_uri, :updated_at, 0), "
+                    "(:xlsx_id, :document_id, :xlsx_checksum, :xlsx_uri, "
+                    ":updated_at, 0)"
+                ),
+                {
+                    "pdf_id": VERSION_A_ID,
+                    "markdown_id": VERSION_B_ID,
+                    "xlsx_id": UUID("91000000-0000-0000-0000-000000000006"),
+                    "document_id": DOCUMENT_ID,
+                    "pdf_checksum": "a" * 64,
+                    "markdown_checksum": "b" * 64,
+                    "xlsx_checksum": "c" * 64,
+                    "pdf_uri": "s3://synthetic-documents/legacy-rule.PDF?download=1",
+                    "markdown_uri": "s3://synthetic-documents/legacy-notes.md#section",
+                    "xlsx_uri": "s3://synthetic-documents/legacy-register.xlsx",
+                    "updated_at": UPDATED_AT,
+                },
+            )
+
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            rows = [
+                (str(row.source_uri), str(row.document_type))
+                for row in connection.execute(
+                    text(
+                        "SELECT source_uri, document_type FROM document_versions "
+                        "ORDER BY source_uri"
+                    )
+                )
+            ]
+        assert rows == [
+            (
+                "s3://synthetic-documents/legacy-notes.md#section",
+                "markdown",
+            ),
+            (
+                "s3://synthetic-documents/legacy-register.xlsx",
+                "xlsx",
+            ),
+            (
+                "s3://synthetic-documents/legacy-rule.PDF?download=1",
+                "pdf",
+            ),
+        ]
+
+        command.downgrade(config, "20260819_0003")
+
+        assert "document_type" not in {
+            column["name"]
+            for column in inspect(engine).get_columns("document_versions")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
+                    ")"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+        downgrade_to_base(config)
+
+
+def test_document_type_migration_fails_closed_for_opaque_legacy_uri() -> None:
+    url = configured_test_database_url()
+    config = alembic_config(url)
+    engine = create_engine(url)
+    try:
+        downgrade_to_base(config)
+        command.upgrade(config, "20260819_0003")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO documents "
+                    "(document_id, source_system, source_id, title) "
+                    "VALUES (:document_id, 'synthetic-plm', 'opaque-rule', "
+                    "'Synthetic opaque rule')"
+                ),
+                {"document_id": DOCUMENT_ID},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO document_versions "
+                    "(version_id, document_id, checksum, source_uri, "
+                    "source_updated_at, security_level) VALUES "
+                    "(:version_id, :document_id, :checksum, :source_uri, "
+                    ":updated_at, 0)"
+                ),
+                {
+                    "version_id": VERSION_A_ID,
+                    "document_id": DOCUMENT_ID,
+                    "checksum": "a" * 64,
+                    "source_uri": "synthetic://opaque-object",
+                    "updated_at": UPDATED_AT,
+                },
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match="^cannot infer document_type for existing document version$",
+        ):
+            command.upgrade(config, "head")
+
+        assert "document_type" not in {
+            column["name"]
+            for column in inspect(engine).get_columns("document_versions")
+        }
+    finally:
+        engine.dispose()
+        downgrade_to_base(config)
