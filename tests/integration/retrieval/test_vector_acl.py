@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite, sqrt
@@ -10,7 +11,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import event, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -1116,6 +1117,60 @@ def test_adapter_rejects_dimension_or_call_profile_mismatch_before_sql(
     assert "secret dimension query" not in str(captured.value)
     assert executed == []
     assert captured.value.__cause__ is None
+
+
+def test_unavailable_local_port_uses_fixed_cause_free_error_without_checkout(
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_query = "secret unavailable query b27e"
+    secret_vector = (0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28)
+    secret_model = "secret-unavailable-model-b27e"
+    secret_profile = EmbeddingProfile(model_id=secret_model, dimension=8)
+    monkeypatch.setattr(
+        "infra.postgres.vector_retrieval.DATABASE_EMBEDDING_MODEL_ID",
+        secret_model,
+    )
+
+    # Keeping this TCP port bound but not listening makes it unavailable to both
+    # a server and this client for the duration of the connection attempt.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
+        reserved_socket.bind(("127.0.0.1", 0))
+        unavailable_port = cast(tuple[str, int], reserved_socket.getsockname())[1]
+        unavailable_engine = create_engine(
+            migrated_engine.url.set(host="127.0.0.1", port=unavailable_port),
+            connect_args={"connect_timeout": 1},
+        )
+        assert unavailable_engine.url.database == "shipyard_ai_test"
+        pool = cast(Any, unavailable_engine.pool)
+        assert pool.checkedout() == 0
+        adapter = PostgresVectorSearchAdapter(unavailable_engine, secret_profile)
+
+        try:
+            with pytest.raises(VectorRetrievalError) as captured:
+                adapter.search(
+                    secret_query,
+                    secret_vector,
+                    secret_profile,
+                    AuthorizationScope(),
+                    KnowledgeFilters(),
+                    10,
+                )
+            assert pool.checkedout() == 0
+        finally:
+            unavailable_engine.dispose()
+
+    assert type(captured.value) is VectorRetrievalError
+    assert str(captured.value) == "vector retrieval unavailable"
+    for secret in (
+        secret_query,
+        repr(secret_vector),
+        secret_model,
+        str(unavailable_port),
+    ):
+        assert secret not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None or captured.value.__suppress_context__
 
 
 def test_database_failure_after_checkout_releases_connection_with_fixed_error(
