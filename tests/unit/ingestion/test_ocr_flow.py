@@ -54,6 +54,7 @@ def _assert_ocr_result_error(
     assert captured.value.code is code
     assert str(captured.value) == message
     assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None or captured.value.__suppress_context__
 
 
 def _resolve_import_module(module_name: str, node: ast.ImportFrom) -> str:
