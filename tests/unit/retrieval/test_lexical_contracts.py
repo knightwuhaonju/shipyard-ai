@@ -203,9 +203,29 @@ def test_lexical_retriever_rejects_invalid_requests_before_calling_port(
 def _is_allowed_retrieval_import(node: ast.Import | ast.ImportFrom) -> bool:
     if isinstance(node, ast.Import):
         return False
-    if node.level != 0:
+    allowed_symbols = {
+        "__future__": {"annotations"},
+        "typing": {"Protocol"},
+        "packages.contracts": {
+            "AuthorizationScope",
+            "KnowledgeEvidence",
+            "KnowledgeFilters",
+        },
+    }
+    if node.level != 0 or node.module not in allowed_symbols:
         return False
-    return node.module in {"__future__", "typing", "packages.contracts"}
+    return all(
+        alias.asname is None and alias.name in allowed_symbols[node.module]
+        for alias in node.names
+    )
+
+
+def _source_uses_only_allowed_retrieval_imports(source: str) -> bool:
+    return all(
+        _is_allowed_retrieval_import(node)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import | ast.ImportFrom)
+    )
 
 
 def test_lexical_service_import_boundary_is_deny_by_default() -> None:
@@ -215,14 +235,27 @@ def test_lexical_service_import_boundary_is_deny_by_default() -> None:
     malicious_relative = "from .. import infra as db"
     malicious_absolute = "from infra import postgres as db"
 
-    assert all(
-        _is_allowed_retrieval_import(node)
-        for node in ast.parse(source).body
-        if isinstance(node, ast.Import | ast.ImportFrom)
-    )
+    assert _source_uses_only_allowed_retrieval_imports(source)
     relative_node = ast.parse(malicious_relative).body[0]
     absolute_node = ast.parse(malicious_absolute).body[0]
     assert isinstance(relative_node, ast.ImportFrom)
     assert isinstance(absolute_node, ast.ImportFrom)
     assert not _is_allowed_retrieval_import(relative_node)
     assert not _is_allowed_retrieval_import(absolute_node)
+
+
+@pytest.mark.parametrize(
+    "malicious_source",
+    [
+        "if enabled:\n    from infra import postgres as db\n",
+        "try:\n    from .. import infra as db\nexcept ImportError:\n    pass\n",
+        "from packages.contracts import UserContext\n",
+        "from packages.contracts import AuthorizationScope as Scope\n",
+        "from typing import Any\n",
+        "from __future__ import generator_stop\n",
+    ],
+)
+def test_lexical_import_guard_rejects_nested_and_disallowed_contract_imports(
+    malicious_source: str,
+) -> None:
+    assert not _source_uses_only_allowed_retrieval_imports(malicious_source)
