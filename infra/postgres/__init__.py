@@ -21,6 +21,7 @@ from infra.postgres.repositories import (
     DomainRepository,
     UnsupportedDomainEntityError,
 )
+from infra.postgres.vector_retrieval import PostgresVectorSearchAdapter
 
 __all__ = [
     "AliasPersistenceError",
@@ -38,5 +39,6 @@ __all__ = [
     "PostgresDocumentRepository",
     "PostgresEmbeddingRepository",
     "PostgresLexicalSearchAdapter",
+    "PostgresVectorSearchAdapter",
     "UnsupportedDomainEntityError",
 ]

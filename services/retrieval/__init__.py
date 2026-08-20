@@ -6,10 +6,20 @@ from services.retrieval.lexical import (
     LexicalSearchPort,
     RetrievalValidationError,
 )
+from services.retrieval.vector import (
+    VectorRetrievalError,
+    VectorRetrievalValidationError,
+    VectorRetriever,
+    VectorSearchPort,
+)
 
 __all__ = [
     "LexicalRetrievalError",
     "LexicalRetriever",
     "LexicalSearchPort",
     "RetrievalValidationError",
+    "VectorRetrievalError",
+    "VectorRetrievalValidationError",
+    "VectorRetriever",
+    "VectorSearchPort",
 ]
