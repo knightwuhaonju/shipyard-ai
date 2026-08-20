@@ -141,7 +141,14 @@ version columns include `document_type`, version constraints include
 ```
 
 Change the migration-head assertion to `20260820_0004`. Add database
-constraint cases for invalid type `"pdfx"` and null type. Run:
+constraint cases for invalid type `"pdfx"` and null type.
+
+Before migration implementation, also add protected Alembic tests that upgrade
+to `20260819_0003`, insert synthetic version rows with `.PDF?download=1`,
+`.md#section`, and `.xlsx` URIs, upgrade to head, and expect `pdf`, `markdown`,
+and `xlsx`. A separate test inserts `synthetic://opaque-object` and expects the
+fixed migration failure with no false type installed. Both always downgrade to
+base in `finally`. Run:
 
 ```bash
 env TEST_DATABASE_URL=postgresql+psycopg://shipyard:shipyard_dev@127.0.0.1:55432/shipyard_ai_test \
@@ -150,7 +157,8 @@ env TEST_DATABASE_URL=postgresql+psycopg://shipyard:shipyard_dev@127.0.0.1:55432
   -k "metadata_declares or migration_is_current_head or document_type" -v
 ```
 
-Expected: failures for absent column, constraint, indexes, and revision.
+Expected: failures for absent column, constraint, indexes, revision, and
+missing backfill/fail-safe migration behavior.
 
 - [ ] **Step 6: Implement model and migration metadata**
 
@@ -206,14 +214,11 @@ CASE
 END
 ```
 
-- [ ] **Step 7: Add migration backfill and unsafe-legacy RED/GREEN coverage**
+- [ ] **Step 7: Confirm migration backfill and unsafe-legacy GREEN**
 
-Use protected Alembic helpers to upgrade to `20260819_0003`, insert synthetic
-version rows with `.PDF?download=1`, `.md#section`, and `.xlsx` URIs, upgrade
-to head, and assert `pdf`, `markdown`, and `xlsx`. In a separate test insert
-`synthetic://opaque-object`, assert upgrade raises, and verify no false type was
-installed. Always downgrade to base in `finally`. Run these exact nodes before
-and after migration implementation.
+Run the exact backfill and unmappable-legacy nodes written in Step 5. Expected:
+known suffixes persist `pdf`, `markdown`, and `xlsx`; the opaque URI raises the
+fixed migration failure and stores no invented type.
 
 - [ ] **Step 8: Verify and commit Task 1**
 
@@ -267,7 +272,11 @@ git commit -m "feat: add document lexical metadata"
 - [ ] **Step 1: Write the public-contract import RED**
 
 Create `tests/unit/retrieval/test_lexical_contracts.py` with future public
-imports and a frozen evidence example:
+imports, the frozen evidence example below, and literal validation tables for
+blank/NUL required text, blank/NUL optional section, page `0`, `-1`, `True`,
+and `1.0`, score `-0.1`, `nan`, `inf`, and `-inf` for every score field,
+forbidden extra fields, every exact `DocumentType`, UUID filters, and both
+contracts' immutability:
 
 ```python
 def test_knowledge_evidence_is_frozen_and_preserves_provenance() -> None:
@@ -331,17 +340,18 @@ reject NUL with `text fields must not contain NUL`. Export `DocumentType`,
 `KnowledgeFilters`, and `KnowledgeEvidence` from `packages.contracts` without
 removing existing auth exports.
 
-- [ ] **Step 3: Add exact contract validation tests**
+- [ ] **Step 3: Confirm exact contract validation GREEN**
 
-Use literal parameter tables covering blank/NUL required text, blank/NUL
-optional section, page `0`, `-1`, `True`, and `1.0`, score `-0.1`, `nan`,
-`inf`, and `-inf` for every score field, forbidden extra fields, every exact
-`DocumentType`, UUID filters, and both contracts' immutability. Run the whole
-contract file and confirm GREEN.
+Run the whole contract file written in Step 1. Expected: every literal valid
+case passes and every invalid case raises the exact Pydantic validation error.
 
 - [ ] **Step 4: Write the service delegation RED**
 
-Add a deterministic recording port and this primary node:
+Add a deterministic recording port, the primary node below, and parameterized
+invalid service cases for non-exact query strings, empty/NUL/over-limit query,
+non-exact scope/filter objects, boolean/non-integer limit, and limits outside
+1–20. Each invalid case expects only `invalid lexical retrieval request` and
+proves the port was not called:
 
 ```python
 def test_lexical_retriever_validates_and_delegates_trusted_scope() -> None:
@@ -399,10 +409,10 @@ boolean/non-integer limits, and values outside 1–20 using only
 calls the port once, and returns the result list unchanged. Export the five
 service names from `services.retrieval`.
 
-- [ ] **Step 6: Add service boundary and architecture tests**
+- [ ] **Step 6: Confirm service boundary and architecture guards**
 
-Parameterize every invalid input above and assert the fixed error does not
-contain query or scope values. Add an AST guard proving the service imports
+Run the delegation and invalid cases written in Step 4. Assert the fixed error
+does not contain query or scope values. Add an AST guard proving the service imports
 only `__future__`, `typing`, and exact `packages.contracts` targets. Include
 malicious snippets `from .. import infra as db` and
 `from infra import postgres as db` so relative/alias syntax cannot bypass it.
@@ -446,7 +456,12 @@ git commit -m "feat: define lexical retrieval contracts"
 
 Create a synthetic helper that inserts two documents, versions, and chunks in
 different projects. Both chunks contain `ballast pump maintenance`; only one
-project UUID is authorized:
+project UUID is authorized. Before production implementation, also add literal
+cases for English terms, identifier `P-101-A`, Chinese `压载泵`, literal `%`,
+`_`, and backslash, PDF/DOCX filter, authorized and unauthorized ship/project
+filters, `limit=1`, deterministic tie ordering, exact evidence fields, and a
+4,000-code-point excerpt. Add the SQL-path/read-only capture guard in the same
+RED test file. The primary node is:
 
 ```python
 def test_lexical_search_returns_only_the_authorized_project(
@@ -548,9 +563,9 @@ the adapter from `infra.postgres` without removing existing exports.
 Run the primary node again. Expected: one authorized evidence result and no
 denied chunk.
 
-- [ ] **Step 5: Add primary ranking, filter, and contract coverage**
+- [ ] **Step 5: Confirm ranking, filter, and contract GREEN**
 
-Add literal integration cases for:
+Run the literal integration cases written in Step 1 for:
 
 - English terms, identifier `P-101-A`, and Chinese `压载泵`;
 - literal `%`, `_`, and backslash query characters match only stored literals;
@@ -563,12 +578,12 @@ Add literal integration cases for:
 - a 4,000-code-point chunk returns a 2,000-code-point excerpt containing the
   literal query.
 
-Expected scores must not reuse the production expression. Assert result order,
+Expected scores do not reuse the production expression. Assert result order,
 finite non-negative values, and equality of lexical/retrieval scores.
 
-- [ ] **Step 6: Add SQL-path and read-only guards**
+- [ ] **Step 6: Confirm SQL-path and add architecture import guards**
 
-Attach a SQLAlchemy `before_cursor_execute` listener around one search. Capture
+Run the SQLAlchemy `before_cursor_execute` guard written in Step 1. Capture
 the candidate SELECT and assert its normalized SQL references
 `security_level`, `department`, `ship_id`, `project_id`, and `LIMIT`; returned
 rows remain the behavior oracle. Capture setup statements and prove the adapter
@@ -619,7 +634,7 @@ git commit -m "feat: search document chunks lexically"
 - Consumes: completed Task 013 contracts and PostgreSQL adapter.
 - Produces: security-complete lexical retrieval ready for Task 014 without widening ACLs.
 
-- [ ] **Step 1: Write RED security matrices before hardening changes**
+- [ ] **Step 1: Add complete security characterization matrices**
 
 Add parameterized synthetic versions so one matching chunk is denied by each
 single dimension:
@@ -636,8 +651,10 @@ project metadata and exactly one dimension differs. Every denied case returns
 `[]`. Add a public, fully global document and prove an empty default scope can
 retrieve it but cannot retrieve any scoped document.
 
-Run these new nodes before modifying production. Expected: every missing or
-incorrect ACL branch fails by returning the synthetic denied chunk.
+Run these new nodes before modifying production. Expected: they pass if Task 3
+fully implemented the approved ACL predicates. Any failure is a genuine RED
+for a missing security behavior and must be fixed minimally before proceeding;
+do not weaken or mutate correct production merely to manufacture a RED state.
 
 - [ ] **Step 2: Add malformed-scope and no-bypass coverage**
 
