@@ -147,20 +147,55 @@ services. Optional OCR output reaches the chunker only through the existing
 
 ## 4. Retrieval
 
-```text
-query
- -> authorization scope
- -> metadata filters
- -> lexical candidates
- -> vector candidates
- -> merge
- -> rerank
- -> Evidence[]
-```
+Task 013 provides ACL-filtered lexical retrieval over every authorized
+immutable document version. It does not choose a current version because the
+document model has no current-version lifecycle marker.
 
-V1 target interface:
+The shared immutable document-format contract is exactly:
 
 ```python
+class DocumentType(StrEnum):
+    PDF = "pdf"
+    DOCX = "docx"
+    XLSX = "xlsx"
+    TXT = "txt"
+    MARKDOWN = "markdown"
+```
+
+The frozen, transport-independent public request and result contracts are:
+
+```python
+class KnowledgeFilters:
+    document_type: DocumentType | None = None
+    ship_id: UUID | None = None
+    project_id: UUID | None = None
+
+
+class KnowledgeEvidence:
+    document_id: UUID
+    version_id: UUID
+    chunk_id: UUID
+    title: str
+    section: str | None = None
+    page: int | None = None
+    source_uri: str
+    excerpt: str
+    retrieval_score: float
+    lexical_score: float | None = None
+    vector_score: float | None = None
+    rerank_score: float | None = None
+```
+
+The service-owned port and validated service entry point are:
+
+```python
+search(
+    query: str,
+    user_scope: AuthorizationScope,
+    filters: KnowledgeFilters,
+    limit: int,
+) -> list[KnowledgeEvidence]
+
 retrieve(
     query: str,
     user_scope: AuthorizationScope,
@@ -169,9 +204,56 @@ retrieve(
 ) -> list[KnowledgeEvidence]
 ```
 
+The query is stripped and must be a non-empty, NUL-free exact string of at
+most 1,000 Unicode code points. The limit must be an exact integer from 1
+through 20. `AuthorizationScope` is computed server-side and passed separately
+from caller filters.
+
+Authorization is part of the PostgreSQL candidate predicate before ranking,
+ordering, and `LIMIT`:
+
+```text
+version.security_level <= scope.security_level
+AND (version.department IS NULL OR version.department IN scope.departments)
+AND (version.ship_id IS NULL OR version.ship_id IN scope.allowed_ship_ids)
+AND (version.project_id IS NULL OR version.project_id IN scope.allowed_project_ids)
+```
+
+Null ACL metadata is global for that dimension. Every non-null dimension
+requires exact membership, and all present dimensions intersect. An empty
+default scope can therefore retrieve a fully global `PUBLIC` document but no
+department-, ship-, project-, or higher-clearance document. Scope ship/project
+values must be canonical UUID text; canonical uppercase text is normalized,
+while malformed and brace-wrapped values are ignored and cannot widen access.
+Document-type, ship, and project filters are additional predicates in the same
+query. An out-of-scope filter returns no result and never triggers an
+unfiltered fallback.
+
+Lexical matching combines `simple` PostgreSQL full-text search with escaped
+literal case-insensitive substring matching backed by `pg_trgm`. The score is
+exactly:
+
+```text
+0.7 * ts_rank_cd(simple_vector, plain_query, 32)
++ 0.3 * similarity(normalized_text, query)
+```
+
+Results order by score descending, source-update time descending, and chunk
+UUID ascending. This final tie-break makes repeated retrieval deterministic.
+Each lexical result sets `retrieval_score` and `lexical_score` to the same
+finite non-negative score. The excerpt is an at-most-2,000-code-point window
+centered on the first case-insensitive literal occurrence; a full-text-only
+match starts at the beginning. Document/version/chunk IDs, title, section,
+page, and source URI remain attached as provenance.
+
+Task 013 does not add vector storage or embeddings (Task 014), hybrid merging
+or reranking (Task 015), an API, Wiki search, Agent behavior, or answer
+synthesis. The optional vector and rerank evidence fields remain unset.
+
 ## 5. Evidence
 
-KnowledgeEvidence contains:
+`KnowledgeEvidence` is an authorized pointer and excerpt, not a new source of
+truth. It contains:
 
 - document_id
 - version_id
@@ -181,9 +263,13 @@ KnowledgeEvidence contains:
 - page
 - source_uri
 - excerpt
+- retrieval_score
 - lexical_score optional
 - vector_score optional
 - rerank_score optional
+
+Original documents and immutable versions remain authoritative. Retrieved
+text is untrusted source data and never an execution instruction.
 
 ## 6. Wiki
 

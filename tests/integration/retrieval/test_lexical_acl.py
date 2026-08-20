@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import create_engine, event
 from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -26,7 +26,7 @@ from packages.domain import (
     Ship,
     document_chunk_id,
 )
-from services.retrieval import LexicalRetriever
+from services.retrieval import LexicalRetrievalError, LexicalRetriever
 
 _BASE_UPDATED_AT = datetime(2026, 8, 20, 8, 0, tzinfo=UTC)
 
@@ -151,6 +151,19 @@ def _retrieve(
     )
 
 
+def _document_row_counts(engine: Engine) -> tuple[int, int, int]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            sql_text(
+                "SELECT "
+                "(SELECT count(*) FROM documents), "
+                "(SELECT count(*) FROM document_versions), "
+                "(SELECT count(*) FROM document_chunks)"
+            )
+        ).one()
+    return cast(tuple[int, int, int], tuple(row))
+
+
 def test_lexical_search_returns_only_the_authorized_project(
     migrated_engine: Engine,
 ) -> None:
@@ -169,6 +182,235 @@ def test_lexical_search_returns_only_the_authorized_project(
     assert [item.chunk_id for item in result] == [allowed_chunk.chunk_id]
     assert denied_chunk.chunk_id not in {item.chunk_id for item in result}
     assert all(type(item) is KnowledgeEvidence for item in result)
+
+
+@pytest.mark.parametrize(
+    ("dimension", "spec", "scope"),
+    [
+        pytest.param(
+            "security",
+            _ChunkSpec(
+                key=3,
+                text="single dimension authorization matrix",
+                security_level=SecurityLevel.CONFIDENTIAL,
+            ),
+            AuthorizationScope(security_level=SecurityLevel.INTERNAL),
+            id="security-clearance",
+        ),
+        pytest.param(
+            "department",
+            _ChunkSpec(
+                key=3,
+                text="single dimension authorization matrix",
+                department="quality",
+            ),
+            AuthorizationScope(departments={"engineering"}),
+            id="department-membership",
+        ),
+        pytest.param(
+            "ship",
+            _ChunkSpec(
+                key=3,
+                text="single dimension authorization matrix",
+                ship_id=UUID("a2000000-0000-0000-0000-000000000102"),
+            ),
+            AuthorizationScope(
+                allowed_ship_ids={"a2000000-0000-0000-0000-000000000101"}
+            ),
+            id="ship-membership",
+        ),
+        pytest.param(
+            "project",
+            _ChunkSpec(
+                key=3,
+                text="single dimension authorization matrix",
+                project_id=UUID("a2000000-0000-0000-0000-000000000202"),
+            ),
+            AuthorizationScope(
+                allowed_project_ids={"a2000000-0000-0000-0000-000000000201"}
+            ),
+            id="project-membership",
+        ),
+    ],
+)
+def test_each_acl_dimension_independently_denies_a_nonmatching_chunk(
+    migrated_engine: Engine,
+    dimension: str,
+    spec: _ChunkSpec,
+    scope: AuthorizationScope,
+) -> None:
+    _persist_records(migrated_engine, spec)
+
+    result = _retrieve(migrated_engine, "authorization matrix", scope)
+
+    assert result == [], dimension
+
+
+@pytest.mark.parametrize("mismatched_dimension", ["department", "ship", "project"])
+def test_all_scoped_acl_dimensions_intersect_and_one_mismatch_denies(
+    migrated_engine: Engine,
+    mismatched_dimension: str,
+) -> None:
+    ship_id = UUID("a2000000-0000-0000-0000-000000000301")
+    project_id = UUID("a2000000-0000-0000-0000-000000000302")
+    _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=4,
+            text="intersection authorization matrix",
+            department="quality",
+            ship_id=ship_id,
+            project_id=project_id,
+        ),
+    )
+    scope = AuthorizationScope(
+        departments={
+            "engineering" if mismatched_dimension == "department" else "quality"
+        },
+        allowed_ship_ids={
+            str(
+                UUID("a2000000-0000-0000-0000-000000000311")
+                if mismatched_dimension == "ship"
+                else ship_id
+            )
+        },
+        allowed_project_ids={
+            str(
+                UUID("a2000000-0000-0000-0000-000000000312")
+                if mismatched_dimension == "project"
+                else project_id
+            )
+        },
+    )
+
+    result = _retrieve(migrated_engine, "authorization matrix", scope)
+
+    assert result == []
+
+
+def test_default_scope_retrieves_only_a_public_fully_global_document(
+    migrated_engine: Engine,
+) -> None:
+    global_chunk, *_scoped_chunks = _persist_records(
+        migrated_engine,
+        _ChunkSpec(key=5, text="default scope authorization matrix"),
+        _ChunkSpec(
+            key=6,
+            text="default scope authorization matrix",
+            security_level=SecurityLevel.INTERNAL,
+        ),
+        _ChunkSpec(
+            key=7,
+            text="default scope authorization matrix",
+            department="engineering",
+        ),
+        _ChunkSpec(
+            key=8,
+            text="default scope authorization matrix",
+            ship_id=UUID("a2000000-0000-0000-0000-000000000401"),
+        ),
+        _ChunkSpec(
+            key=9,
+            text="default scope authorization matrix",
+            project_id=UUID("a2000000-0000-0000-0000-000000000402"),
+        ),
+    )
+
+    result = _retrieve(migrated_engine, "authorization matrix")
+
+    assert [item.chunk_id for item in result] == [global_chunk.chunk_id]
+
+
+@pytest.mark.parametrize("dimension", ["ship", "project"])
+def test_invalid_scope_uuid_values_neither_raise_nor_grant_scoped_documents(
+    migrated_engine: Engine,
+    dimension: str,
+) -> None:
+    allowed_id = UUID("a2000000-0000-0000-0000-000000000010")
+    denied_id = UUID("a2000000-0000-0000-0000-000000000001")
+    allowed_chunk, denied_chunk = _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=13,
+            text="malformed scope authorization matrix",
+            ship_id=allowed_id if dimension == "ship" else None,
+            project_id=allowed_id if dimension == "project" else None,
+        ),
+        _ChunkSpec(
+            key=14,
+            text="malformed scope authorization matrix",
+            ship_id=denied_id if dimension == "ship" else None,
+            project_id=denied_id if dimension == "project" else None,
+        ),
+    )
+    scope_values = {
+        str(allowed_id),
+        "not-a-uuid",
+        "{a2000000-0000-0000-0000-000000000001}",
+        "1",
+    }
+    scope = AuthorizationScope(
+        allowed_ship_ids=scope_values if dimension == "ship" else set(),
+        allowed_project_ids=scope_values if dimension == "project" else set(),
+    )
+
+    result = _retrieve(migrated_engine, "authorization matrix", scope)
+
+    assert [item.chunk_id for item in result] == [allowed_chunk.chunk_id]
+    assert denied_chunk.chunk_id not in {item.chunk_id for item in result}
+
+
+@pytest.mark.parametrize("dimension", ["ship", "project"])
+def test_uppercase_canonical_scope_uuid_is_accepted(
+    migrated_engine: Engine,
+    dimension: str,
+) -> None:
+    resource_id = UUID("a2000000-0000-0000-0000-0000000000ab")
+    (chunk,) = _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=15,
+            text="uppercase canonical authorization matrix",
+            ship_id=resource_id if dimension == "ship" else None,
+            project_id=resource_id if dimension == "project" else None,
+        ),
+    )
+    scope = AuthorizationScope(
+        allowed_ship_ids={str(resource_id).upper()} if dimension == "ship" else set(),
+        allowed_project_ids=(
+            {str(resource_id).upper()} if dimension == "project" else set()
+        ),
+    )
+
+    result = _retrieve(migrated_engine, "authorization matrix", scope)
+
+    assert [item.chunk_id for item in result] == [chunk.chunk_id]
+
+
+@pytest.mark.parametrize("dimension", ["ship", "project"])
+def test_brace_wrapped_scope_uuid_is_denied(
+    migrated_engine: Engine,
+    dimension: str,
+) -> None:
+    resource_id = UUID("a2000000-0000-0000-0000-000000000001")
+    _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=16,
+            text="brace wrapped authorization matrix",
+            ship_id=resource_id if dimension == "ship" else None,
+            project_id=resource_id if dimension == "project" else None,
+        ),
+    )
+    wrapped_id = "{a2000000-0000-0000-0000-000000000001}"
+    scope = AuthorizationScope(
+        allowed_ship_ids={wrapped_id} if dimension == "ship" else set(),
+        allowed_project_ids={wrapped_id} if dimension == "project" else set(),
+    )
+
+    result = _retrieve(migrated_engine, "authorization matrix", scope)
+
+    assert result == []
 
 
 @pytest.mark.parametrize(
@@ -276,6 +518,63 @@ def test_lexical_search_intersects_ship_and_project_filters_with_scope(
     assert [item.chunk_id for item in result] == (
         [chunk.chunk_id] if authorized else []
     )
+
+
+@pytest.mark.parametrize("dimension", ["ship", "project"])
+def test_out_of_scope_filter_returns_zero_without_an_unfiltered_fallback(
+    migrated_engine: Engine,
+    dimension: str,
+) -> None:
+    resource_id = UUID("a2000000-0000-0000-0000-000000000501")
+    other_id = UUID("a2000000-0000-0000-0000-000000000502")
+    _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=41,
+            text="out of scope filter authorization matrix",
+            ship_id=resource_id if dimension == "ship" else None,
+            project_id=resource_id if dimension == "project" else None,
+        ),
+    )
+    scope = AuthorizationScope(
+        allowed_ship_ids={str(other_id)} if dimension == "ship" else set(),
+        allowed_project_ids={str(other_id)} if dimension == "project" else set(),
+    )
+    filters = KnowledgeFilters(
+        ship_id=resource_id if dimension == "ship" else None,
+        project_id=resource_id if dimension == "project" else None,
+    )
+    executed: list[str] = []
+
+    def _capture(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        executed.append(statement)
+
+    event.listen(migrated_engine, "before_cursor_execute", _capture)
+    try:
+        result = _retrieve(
+            migrated_engine,
+            "filter authorization matrix",
+            scope,
+            filters,
+        )
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _capture)
+
+    candidate_selects = [
+        statement
+        for statement in executed
+        if statement.lstrip().lower().startswith("select ")
+        and "document_chunks" in statement.lower()
+    ]
+    assert result == []
+    assert len(candidate_selects) == 1
 
 
 def test_lexical_limit_returns_the_highest_ranked_result(
@@ -486,3 +785,82 @@ def test_candidate_sql_contains_acl_limit_read_only_and_local_timeout(
     for acl_column in ("security_level", "department", "ship_id", "project_id"):
         assert where_position < sql.index(acl_column, where_position) < order_position
     assert order_position < limit_position
+
+
+def test_successful_search_emits_no_mutation_and_releases_its_connection(
+    migrated_engine: Engine,
+) -> None:
+    (chunk,) = _persist_records(
+        migrated_engine,
+        _ChunkSpec(key=90, text="read only transaction authorization matrix"),
+    )
+    before_counts = _document_row_counts(migrated_engine)
+    pool = cast(Any, migrated_engine.pool)
+    assert pool.checkedout() == 0
+    executed: list[str] = []
+
+    def _capture(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        executed.append(" ".join(statement.upper().split()))
+
+    event.listen(migrated_engine, "before_cursor_execute", _capture)
+    try:
+        result = _retrieve(migrated_engine, "transaction authorization matrix")
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _capture)
+
+    forbidden_statement_starts = (
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "ALTER ",
+        "DROP ",
+        "TRUNCATE ",
+        "COMMENT ",
+        "GRANT ",
+        "REVOKE ",
+    )
+    assert [item.chunk_id for item in result] == [chunk.chunk_id]
+    assert all(
+        not statement.startswith(forbidden_statement_starts)
+        for statement in executed
+    )
+    assert _document_row_counts(migrated_engine) == before_counts
+    assert pool.checkedout() == 0
+
+
+def test_database_failure_uses_a_fixed_cause_free_error(
+    migrated_engine: Engine,
+) -> None:
+    unavailable_engine = create_engine(
+        migrated_engine.url.set(host="127.0.0.1", port=1),
+        connect_args={"connect_timeout": 1},
+    )
+    adapter = PostgresLexicalSearchAdapter(unavailable_engine)
+    try:
+        with pytest.raises(
+            LexicalRetrievalError,
+            match="^lexical retrieval unavailable$",
+        ) as captured:
+            adapter.search(
+                "secret query text",
+                AuthorizationScope(),
+                KnowledgeFilters(),
+                10,
+            )
+    finally:
+        unavailable_engine.dispose()
+
+    assert "secret query text" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert (
+        captured.value.__context__ is None
+        or captured.value.__suppress_context__
+    )

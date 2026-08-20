@@ -110,6 +110,12 @@ def test_knowledge_filters_accept_exact_document_types_and_uuid_filters() -> Non
         )
 
 
+@pytest.mark.parametrize("field", ["allowed_ship_ids", "allowed_project_ids"])
+def test_authorization_scope_rejects_a_blank_scoped_identifier(field: str) -> None:
+    with pytest.raises(ValidationError):
+        AuthorizationScope.model_validate({field: [" "]})
+
+
 type SearchCall = tuple[str, AuthorizationScope, KnowledgeFilters, int]
 
 
