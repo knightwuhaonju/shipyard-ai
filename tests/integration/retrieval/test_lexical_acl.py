@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -349,6 +350,48 @@ def test_lexical_search_returns_exact_evidence_fields_and_scores(
     assert evidence.rerank_score is None
 
 
+def test_lexical_score_matches_independent_component_oracle(
+    migrated_engine: Engine,
+) -> None:
+    document_text = "Synthetic ballast pump maintenance evidence."
+    query = "ballast pump"
+    _persist_records(
+        migrated_engine,
+        _ChunkSpec(key=71, text=document_text, title="Synthetic score oracle"),
+    )
+
+    (evidence,) = _retrieve(migrated_engine, query)
+    parameters = {"document_text": document_text, "query": query}
+    with migrated_engine.connect() as connection:
+        fts_normalized_32 = connection.scalar(
+            sql_text(
+                "SELECT ts_rank_cd("
+                "to_tsvector('simple'::regconfig, :document_text), "
+                "plainto_tsquery('simple'::regconfig, :query), 32)"
+            ),
+            parameters,
+        )
+        trigram = connection.scalar(
+            sql_text("SELECT similarity(:document_text, :query)"), parameters
+        )
+        fts_unnormalized = connection.scalar(
+            sql_text(
+                "SELECT ts_rank_cd("
+                "to_tsvector('simple'::regconfig, :document_text), "
+                "plainto_tsquery('simple'::regconfig, :query), 0)"
+            ),
+            parameters,
+        )
+
+    assert fts_normalized_32 is not None
+    assert trigram is not None
+    assert fts_unnormalized is not None
+    assert float(fts_normalized_32) != pytest.approx(float(fts_unnormalized))
+    expected_score = 0.7 * float(fts_normalized_32) + 0.3 * float(trigram)
+    assert evidence.lexical_score == pytest.approx(expected_score)
+    assert evidence.retrieval_score == pytest.approx(expected_score)
+
+
 def test_long_evidence_excerpt_is_a_centered_two_thousand_character_window(
     migrated_engine: Engine,
 ) -> None:
@@ -361,6 +404,34 @@ def test_long_evidence_excerpt_is_a_centered_two_thousand_character_window(
     assert len(evidence.excerpt) == 2000
     assert evidence.excerpt == text[1503:3503]
     assert "NEEDLE" in evidence.excerpt
+
+
+def test_excerpt_maps_expanding_casefold_match_to_original_text_offset(
+    migrated_engine: Engine,
+) -> None:
+    text = "ß" * 1500 + "NEEDLE" + "x" * 2494
+    _persist_records(migrated_engine, _ChunkSpec(key=81, text=text))
+
+    (evidence,) = _retrieve(migrated_engine, "NEEDLE")
+
+    assert len(text) == 4000
+    assert len(evidence.excerpt) == 2000
+    assert evidence.excerpt == text[503:2503]
+    assert "NEEDLE" in evidence.excerpt
+
+
+def test_fts_only_match_excerpt_starts_at_the_beginning(
+    migrated_engine: Engine,
+) -> None:
+    prefix = "pump synthetic maintenance "
+    text = prefix + "x" * (4000 - len(prefix))
+    _persist_records(migrated_engine, _ChunkSpec(key=82, text=text))
+
+    (evidence,) = _retrieve(migrated_engine, "pump maintenance")
+
+    assert "pump maintenance" not in text.casefold()
+    assert len(evidence.excerpt) == 2000
+    assert evidence.excerpt == text[:2000]
 
 
 def test_candidate_sql_contains_acl_limit_read_only_and_local_timeout(

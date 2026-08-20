@@ -44,15 +44,32 @@ def _literal_ilike_pattern(query: str) -> str:
     return f"%{escaped}%"
 
 
+def _casefold_match_span(text_value: str, query: str) -> tuple[int, int] | None:
+    folded_parts: list[str] = []
+    original_offsets: list[int] = []
+    for original_offset, character in enumerate(text_value):
+        folded_character = character.casefold()
+        folded_parts.append(folded_character)
+        original_offsets.extend([original_offset] * len(folded_character))
+
+    folded_query = query.casefold()
+    folded_match = "".join(folded_parts).find(folded_query)
+    if folded_match < 0 or not folded_query:
+        return None
+    match_end = folded_match + len(folded_query) - 1
+    return original_offsets[folded_match], original_offsets[match_end] + 1
+
+
 def _excerpt(text_value: str, query: str) -> str:
     if len(text_value) <= MAX_EVIDENCE_EXCERPT_CHARS:
         return text_value
-    match_index = text_value.casefold().find(query.casefold())
-    if match_index < 0:
+    match_span = _casefold_match_span(text_value, query)
+    if match_span is None:
         start = 0
     else:
+        match_start, match_end = match_span
         centered_start = (
-            match_index + len(query) // 2 - MAX_EVIDENCE_EXCERPT_CHARS // 2
+            (match_start + match_end) // 2 - MAX_EVIDENCE_EXCERPT_CHARS // 2
         )
         start = max(
             0,
