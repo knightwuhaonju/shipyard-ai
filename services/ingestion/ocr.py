@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
+import services.ingestion.parser as parser_contract
 from services.ingestion.parser import (
     DocumentFormat,
     ParsedBlock,
@@ -57,18 +58,44 @@ class OcrFallbackParser:
         return _ocr_document(pages)
 
 
-def _ocr_document(pages: tuple[OcrPage, ...]) -> ParsedDocument:
+def _ocr_document(result: object) -> ParsedDocument:
+    if type(result) is not tuple:
+        raise ParserError(ParserErrorCode.INVALID_DOCUMENT)
+    pages = cast(tuple[object, ...], result)
     blocks: list[ParsedBlock] = []
-    for page in pages:
-        text = normalize_block_text(page.text)
+    previous_page = 0
+    total_chars = 0
+
+    for item in pages:
+        if type(item) is not OcrPage:
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT)
+        if type(item.page) is not int or item.page <= previous_page:
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT)
+        if item.page > parser_contract.MAX_PDF_PAGES:
+            raise ParserError(ParserErrorCode.RESOURCE_LIMIT)
+        previous_page = item.page
+        try:
+            text = normalize_block_text(item.text)
+        except ValueError:
+            raise ParserError(ParserErrorCode.INVALID_DOCUMENT) from None
         if not text:
             continue
+        if (
+            len(blocks) >= parser_contract.MAX_BLOCKS
+            or len(text) > parser_contract.MAX_BLOCK_CHARS
+            or total_chars + len(text) > parser_contract.MAX_TOTAL_TEXT_CHARS
+        ):
+            raise ParserError(ParserErrorCode.RESOURCE_LIMIT)
         blocks.append(
             ParsedBlock(
                 ordinal=len(blocks),
                 kind=ParsedBlockKind.PAGE,
                 text=text,
-                page=page.page,
+                page=item.page,
             )
         )
+        total_chars += len(text)
+
+    if not blocks:
+        raise ParserError(ParserErrorCode.EMPTY_DOCUMENT)
     return ParsedDocument(format=DocumentFormat.PDF, blocks=tuple(blocks))

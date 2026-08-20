@@ -76,10 +76,18 @@ Supported parsing behavior is deliberately bounded and deterministic:
 - XLSX emits each non-empty worksheet as one whole table in workbook order,
   with its sheet title. Formula cells remain literal formula strings; macros
   and external links are not executed or followed.
-- PDF reads only the existing text layer, emits one block per non-empty page,
+- PDF parsing remains text-layer-first, emits one block per non-empty page,
   and retains the page's original one-based number. A textless PDF returns
-  `OCR_REQUIRED`. OCR is disabled in Task 010; a later optional OCR adapter is
-  owned by Task 012 and must preserve page provenance and the original file.
+  `OCR_REQUIRED`. `OcrFallbackParser` remains disabled unless an `OcrPort` is
+  explicitly injected, and only `OCR_REQUIRED` invokes that port. Successful
+  results become normalized PDF `PAGE` blocks with original page numbers and
+  contiguous ordinals.
+
+Task 012 adds no real OCR engine. Its deterministic fake exists only for local
+contract tests. OCR text is a derived, untrusted parsing artifact; the original
+PDF and immutable document version remain authoritative. OCR orchestration
+accepts bytes only and does not persist, chunk, retrieve, authorize, use paths,
+make external calls, or replace document/version provenance.
 
 Expected failures use a typed `ParserErrorCode` and a fixed safe message:
 invalid or encrypted input, unsupported text encoding, empty content, resource
@@ -134,8 +142,8 @@ equal chunks and IDs.
 Chunking has no tokenizer, model, OCR, network, filesystem, persistence, or
 authorization behavior. ACL metadata remains on `DocumentVersion` and is
 inherited through `version_id`; authorization is enforced by later retrieval
-services. Optional scanned-PDF OCR remains Task 012 work and is not implemented
-by the chunker.
+services. Optional OCR output reaches the chunker only through the existing
+`ParsedDocument` contract; the chunker itself has no OCR behavior.
 
 ## 4. Retrieval
 
