@@ -625,25 +625,44 @@ def test_candidate_sql_binds_profile_filters_acl_order_and_limit_before_ranking(
 ) -> None:
     ship_id = _id(3, 90)
     project_id = _id(3, 91)
+    query_sentinel = "query-bind-sentinel-9f4a"
+    vector_sentinel = (
+        0.125,
+        -0.25,
+        0.375,
+        0.5,
+        -0.625,
+        0.75,
+        -0.875,
+        1.0,
+    )
+    database_vector_sentinel = (
+        "[0.125,-0.25,0.375,0.5,-0.625,0.75,-0.875,1.0]"
+    )
+    department_sentinel = "department-bind-sentinel-7c91"
+    security_sentinel = SecurityLevel.RESTRICTED
+    document_type_sentinel = DocumentType.MARKDOWN
+    limit_sentinel = 7
     (chunk,) = _persist_records(
         migrated_engine,
         _ChunkSpec(
             key=90,
             text="sql profile acl vector evidence",
-            security_level=SecurityLevel.INTERNAL,
-            department="engineering",
+            security_level=security_sentinel,
+            department=department_sentinel,
             ship_id=ship_id,
             project_id=project_id,
+            document_type=document_type_sentinel,
         ),
     )
     scope = AuthorizationScope(
-        security_level=SecurityLevel.INTERNAL,
-        departments={"engineering"},
+        security_level=security_sentinel,
+        departments={department_sentinel},
         allowed_ship_ids={str(ship_id)},
         allowed_project_ids={str(project_id)},
     )
     filters = KnowledgeFilters(
-        document_type=DocumentType.PDF,
+        document_type=document_type_sentinel,
         ship_id=ship_id,
         project_id=project_id,
     )
@@ -663,10 +682,11 @@ def test_candidate_sql_binds_profile_filters_acl_order_and_limit_before_ranking(
     try:
         result = _retrieve(
             migrated_engine,
-            query="sql profile acl",
+            query=query_sentinel,
+            query_vector=vector_sentinel,
             scope=scope,
             filters=filters,
-            limit=7,
+            limit=limit_sentinel,
         )
     finally:
         event.remove(migrated_engine, "before_cursor_execute", _capture)
@@ -707,15 +727,51 @@ def test_candidate_sql_binds_profile_filters_acl_order_and_limit_before_ranking(
     assert "chunk_id asc" in candidate_sql[order_position:]
     assert order_position < limit_position
 
+    assert "%(query_embedding)s" in candidate_sql
+    assert "%(embedding_model)s" in candidate_sql
+    assert "%(scope_security_level)s" in candidate_sql
+    assert "%(scope_departments_1)s" in candidate_sql
+    assert "%(scope_ship_ids_1)s" in candidate_sql
+    assert "%(scope_project_ids_1)s" in candidate_sql
+    assert "%(document_type)s" in candidate_sql
+    assert "%(ship_id)s" in candidate_sql
+    assert "%(project_id)s" in candidate_sql
+    assert "%(limit)s" in candidate_sql
+
+    assert query_sentinel not in candidate_sql
+    assert database_vector_sentinel not in candidate_sql
     assert _MODEL_ID not in candidate_sql
+    assert department_sentinel not in candidate_sql
+    assert document_type_sentinel.value not in candidate_sql
     assert str(ship_id) not in candidate_sql
     assert str(project_id) not in candidate_sql
     assert isinstance(candidate_parameters, dict)
-    parameter_text = repr(candidate_parameters)
-    assert _MODEL_ID in parameter_text
-    assert str(ship_id) in parameter_text
-    assert str(project_id) in parameter_text
-    assert "7" in parameter_text
+    assert set(candidate_parameters) == {
+        "query_embedding",
+        "embedding_model",
+        "scope_security_level",
+        "scope_departments_1",
+        "scope_ship_ids_1",
+        "scope_project_ids_1",
+        "document_type",
+        "ship_id",
+        "project_id",
+        "limit",
+    }
+    assert "query" not in candidate_parameters
+    assert query_sentinel not in candidate_parameters.values()
+    assert candidate_parameters == {
+        "query_embedding": database_vector_sentinel,
+        "embedding_model": _MODEL_ID,
+        "scope_security_level": security_sentinel.value,
+        "scope_departments_1": department_sentinel,
+        "scope_ship_ids_1": ship_id,
+        "scope_project_ids_1": project_id,
+        "document_type": document_type_sentinel.value,
+        "ship_id": ship_id,
+        "project_id": project_id,
+        "limit": limit_sentinel,
+    }
 
 
 def test_successful_vector_search_is_read_only_and_releases_its_connection(
