@@ -12,6 +12,7 @@ dependencies = [
     "defusedxml>=0.7,<1.0",
     "fastapi>=0.115,<0.116",
     "openpyxl>=3.1,<4.0",
+    "pgvector>=0.4,<0.6",
     "psycopg[binary]>=3.2,<4.0",
     "pypdf>=6.0,<7.0",
     "pydantic>=2.10,<3.0",

@@ -3,6 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
+from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     ARRAY,
     CheckConstraint,
@@ -19,6 +20,9 @@ from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from infra.postgres.models import Base
+
+DATABASE_EMBEDDING_DIMENSION = 8
+DATABASE_EMBEDDING_MODEL_ID = "fake-deterministic-v1"
 
 
 class DocumentModel(Base):
@@ -168,3 +172,42 @@ class DocumentChunkModel(Base):
     normalized_text: Mapped[str] = mapped_column(Text, nullable=False)
     page: Mapped[int | None] = mapped_column(Integer, index=True)
     section: Mapped[str | None] = mapped_column(Text)
+
+
+class DocumentChunkEmbeddingModel(Base):
+    """One immutable embedding space record for a document chunk."""
+
+    __tablename__ = "document_chunk_embeddings"
+    __table_args__ = (
+        CheckConstraint(
+            "btrim(embedding_model) <> ''",
+            name="ck_document_chunk_embeddings_model",
+        ),
+        CheckConstraint(
+            "vector_norm(embedding) > 0",
+            name="ck_document_chunk_embeddings_nonzero",
+        ),
+        Index(
+            "ix_document_chunk_embeddings_model",
+            "embedding_model",
+        ),
+        Index(
+            "ix_document_chunk_embeddings_hnsw_cosine",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    chunk_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey(
+            "document_chunks.chunk_id",
+            name="fk_document_chunk_embeddings_chunk_id",
+        ),
+        primary_key=True,
+    )
+    embedding_model: Mapped[str] = mapped_column(Text, primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(
+        VECTOR(DATABASE_EMBEDDING_DIMENSION), nullable=False
+    )

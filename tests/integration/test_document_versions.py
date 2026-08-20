@@ -740,7 +740,7 @@ def test_document_migration_is_current_head(migrated_engine: Engine) -> None:
             connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            == "20260820_0004"
+            == "20260820_0005"
         )
         assert connection.execute(
             text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')")
