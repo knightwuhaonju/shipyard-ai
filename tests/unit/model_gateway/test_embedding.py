@@ -241,10 +241,17 @@ def _is_allowed_fake_import(node: ast.Import | ast.ImportFrom) -> bool:
 
 def _source_uses_only_allowed_imports(source: str, *, fake: bool) -> bool:
     checker = _is_allowed_fake_import if fake else _is_allowed_gateway_import
-    return all(
-        checker(node)
-        for node in ast.walk(ast.parse(source))
+    tree = ast.parse(source)
+    top_level_imports = [
+        node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    all_imports = [
+        node
+        for node in ast.walk(tree)
         if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    return len(top_level_imports) == len(all_imports) and all(
+        checker(node) for node in all_imports
     )
 
 
@@ -272,10 +279,16 @@ def test_embedding_source_import_boundaries_are_deny_by_default(
         ("try:\n    from .. import database\nexcept ImportError:\n    pass\n", False),
         ("from math import isfinite as finite\n", False),
         ("from math import *\n", False),
+        ("def hidden():\n    from math import isfinite\n", False),
         ("import requests\n", False),
         ("from services.retrieval import LexicalRetriever\n", False),
         ("from collections.abc import Mapping as Map\n", True),
         ("from .embedding import EmbeddingProfile\n", True),
+        (
+            "def hidden():\n"
+            "    from services.model_gateway.embedding import EmbeddingProfile\n",
+            True,
+        ),
         ("from sqlalchemy import Engine\n", True),
         ("import socket\n", True),
     ],
