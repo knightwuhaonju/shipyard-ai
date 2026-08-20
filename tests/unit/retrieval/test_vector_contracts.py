@@ -177,7 +177,9 @@ def test_vector_retriever_accepts_exact_limit_boundaries(limit: int) -> None:
 
 
 def test_vector_retriever_translates_only_typed_embedding_failure() -> None:
-    fake = FakeEmbeddingAdapter(_profile(), {})
+    secret_model = "model-secret-a81f"
+    profile = EmbeddingProfile(model_id=secret_model, dimension=8)
+    fake = FakeEmbeddingAdapter(profile, {})
     port = RecordingVectorPort([])
 
     with pytest.raises(
@@ -188,6 +190,7 @@ def test_vector_retriever_translates_only_typed_embedding_failure() -> None:
         )
 
     assert "secret ballast query" not in str(captured.value)
+    assert secret_model not in str(captured.value)
     assert fake.calls == (("secret ballast query",),)
     assert port.calls == []
     assert captured.value.__cause__ is None

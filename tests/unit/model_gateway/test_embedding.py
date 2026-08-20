@@ -181,6 +181,25 @@ def test_fake_copies_vector_mapping_and_raises_typed_error_for_missing_text() ->
     assert captured.value.__cause__ is None
 
 
+def test_fake_returns_each_batch_in_request_order_deterministically() -> None:
+    profile = EmbeddingProfile(model_id="model", dimension=3)
+    first_vector = (1.0, 0.0, 0.0)
+    second_vector = (0.0, 1.0, 0.0)
+    adapter = FakeEmbeddingAdapter(
+        profile,
+        {"first": first_vector, "second": second_vector},
+    )
+
+    assert adapter.embed(("first", "second")) == (first_vector, second_vector)
+    assert adapter.embed(("second", "first")) == (second_vector, first_vector)
+    assert adapter.embed(("first", "second")) == (first_vector, second_vector)
+    assert adapter.calls == (
+        ("first", "second"),
+        ("second", "first"),
+        ("first", "second"),
+    )
+
+
 @pytest.mark.parametrize(
     "vectors",
     [

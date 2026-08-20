@@ -246,9 +246,44 @@ centered on the first case-insensitive literal occurrence; a full-text-only
 match starts at the beginning. Document/version/chunk IDs, title, section,
 page, and source URI remain attached as provenance.
 
-Task 013 does not add vector storage or embeddings (Task 014), hybrid merging
-or reranking (Task 015), an API, Wiki search, Agent behavior, or answer
-synthesis. The optional vector and rerank evidence fields remain unset.
+Task 013 leaves the optional vector and rerank evidence fields unset.
+
+### Vector retrieval (Task 014)
+
+Task 014 adds a vendor-neutral `EmbeddingProfile`, `EmbeddingPort`, and
+validated gateway. The initial PostgreSQL profile is model
+`fake-deterministic-v1`, dimension 8, cosine distance, and an HNSW
+`vector_cosine_ops` index. The deterministic mapping fake is for unit tests and
+local checks only; it performs no model, network, filesystem, database,
+environment, clock, or random operation. A real provider remains behind the
+same port and must translate its own failures without changing retrieval or
+domain contracts.
+
+Embeddings are model-versioned, derived retrieval artifacts stored separately
+from document metadata in `document_chunk_embeddings` as `VECTOR(8)`. The
+primary key `(chunk_id, embedding_model)` preserves the originating chunk and
+embedding profile without overwriting another model's vector. The chunk joins
+back through its immutable version and document, so document/version/chunk
+identifiers, title, page, section, source URI, and excerpt remain attached as
+provenance. Original documents and immutable versions remain authoritative;
+neither an embedding nor a vector score is a source of truth.
+
+Vector search selects only the exact active model and applies the same ACL and
+request-filter predicates before distance ordering and `LIMIT`. It searches
+every embedded authorized immutable version because the document model has no
+current-version lifecycle marker. Cosine distance orders ascending, then
+source-update time orders descending, then chunk UUID orders ascending for a
+deterministic tie-break. The public score is
+`max(0.0, 1.0 - cosine_distance)`; `retrieval_score` and `vector_score` are
+equal, while `lexical_score` and `rerank_score` remain unset.
+
+Task 014 does not automatically embed chunks during ingestion. Changing the
+database dimension requires an explicit migration, index rebuild, and
+re-embedding under a new model version; a runtime model/dimension mismatch
+fails closed. Filtered HNSW search is approximate, so restrictive predicates
+may reduce recall even though they cannot authorize a row. Automatic embedding
+jobs, hybrid fusion, and reranking remain outside Task 014; hybrid and rerank
+behavior belongs to Task 015.
 
 ## 5. Evidence
 

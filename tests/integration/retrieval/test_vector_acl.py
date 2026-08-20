@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite, sqrt
@@ -10,7 +11,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -207,6 +208,22 @@ def _document_row_counts(engine: Engine) -> tuple[int, int, int, int]:
     return cast(tuple[int, int, int, int], tuple(row))
 
 
+def _assert_all_tables_queryable(engine: Engine) -> None:
+    table_names = inspect(engine).get_table_names()
+    assert {
+        "documents",
+        "document_versions",
+        "document_chunks",
+        "document_chunk_embeddings",
+    }.issubset(table_names)
+    with engine.connect() as connection:
+        quote = connection.dialect.identifier_preparer.quote
+        for table_name in table_names:
+            connection.execute(
+                sql_text(f"SELECT count(*) FROM {quote(table_name)}")
+            ).scalar_one()
+
+
 def test_vector_search_returns_only_the_authorized_project(
     migrated_engine: Engine,
 ) -> None:
@@ -309,15 +326,20 @@ def test_each_acl_dimension_denies_a_nonmatching_vector_candidate(
     spec: _ChunkSpec,
     scope: AuthorizationScope,
 ) -> None:
-    _persist_records(migrated_engine, spec)
+    allowed_chunk, denied_chunk = _persist_records(
+        migrated_engine,
+        _ChunkSpec(key=9, text="equally similar public global evidence"),
+        spec,
+    )
 
-    assert _retrieve(migrated_engine, scope=scope) == [], dimension
+    result = _retrieve(migrated_engine, scope=scope, limit=1)
+
+    assert [item.chunk_id for item in result] == [allowed_chunk.chunk_id], dimension
+    assert denied_chunk.chunk_id not in {item.chunk_id for item in result}
 
 
-@pytest.mark.parametrize(
-    "mismatched_dimension", ["security", "department", "ship", "project"]
-)
-def test_all_four_acl_dimensions_intersect_before_vector_ranking(
+@pytest.mark.parametrize("mismatched_dimension", ["department", "ship", "project"])
+def test_department_ship_and_project_acl_dimensions_intersect(
     migrated_engine: Engine,
     mismatched_dimension: str,
 ) -> None:
@@ -335,11 +357,7 @@ def test_all_four_acl_dimensions_intersect_before_vector_ranking(
         ),
     )
     scope = AuthorizationScope(
-        security_level=(
-            SecurityLevel.PUBLIC
-            if mismatched_dimension == "security"
-            else SecurityLevel.INTERNAL
-        ),
+        security_level=SecurityLevel.INTERNAL,
         departments={
             "engineering" if mismatched_dimension == "department" else "quality"
         },
@@ -385,6 +403,47 @@ def test_null_global_documents_are_visible_but_scoped_documents_fail_closed(
     result = _retrieve(migrated_engine, query="semantic default scope")
 
     assert [item.chunk_id for item in result] == [global_chunk.chunk_id]
+
+
+@pytest.mark.parametrize("dimension", ["ship", "project"])
+def test_scope_uuid_canonicalization_accepts_uppercase_without_malformed_bypass(
+    migrated_engine: Engine,
+    dimension: str,
+) -> None:
+    allowed_id = _id(3, 25 if dimension == "ship" else 26)
+    denied_id = _id(3, 27 if dimension == "ship" else 28)
+    allowed_chunk, denied_chunk = _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=25,
+            text="uppercase canonical scope evidence",
+            ship_id=allowed_id if dimension == "ship" else None,
+            project_id=allowed_id if dimension == "project" else None,
+        ),
+        _ChunkSpec(
+            key=26,
+            text="malformed scope must not grant evidence",
+            ship_id=denied_id if dimension == "ship" else None,
+            project_id=denied_id if dimension == "project" else None,
+        ),
+    )
+    mixed_scope_values = {
+        str(allowed_id).upper(),
+        "not-a-uuid",
+        f"{{{denied_id}}}",
+        "1",
+    }
+    scope = AuthorizationScope(
+        allowed_ship_ids=mixed_scope_values if dimension == "ship" else set(),
+        allowed_project_ids=(
+            mixed_scope_values if dimension == "project" else set()
+        ),
+    )
+
+    result = _retrieve(migrated_engine, scope=scope)
+
+    assert [item.chunk_id for item in result] == [allowed_chunk.chunk_id]
+    assert denied_chunk.chunk_id not in {item.chunk_id for item in result}
 
 
 def test_vector_search_applies_document_type_filter(
@@ -774,6 +833,115 @@ def test_candidate_sql_binds_profile_filters_acl_order_and_limit_before_ranking(
     }
 
 
+def test_malicious_query_model_and_document_text_remain_bound_untrusted_data(
+    migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malicious_text = "x'); DROP TABLE documents; --"
+    malicious_profile = EmbeddingProfile(
+        model_id=malicious_text,
+        dimension=8,
+    )
+    vector_sentinel = (
+        0.125,
+        -0.25,
+        0.375,
+        0.5,
+        -0.625,
+        0.75,
+        -0.875,
+        1.0,
+    )
+    database_vector_sentinel = (
+        "[0.125,-0.25,0.375,0.5,-0.625,0.75,-0.875,1.0]"
+    )
+    target_chunk, unrelated_chunk = _persist_records(
+        migrated_engine,
+        _ChunkSpec(
+            key=92,
+            text=f"Synthetic literal-bearing document: {malicious_text}",
+            embedding=vector_sentinel,
+            embedding_model=malicious_text,
+        ),
+        _ChunkSpec(
+            key=93,
+            text="unrelated default-model document",
+            embedding=vector_sentinel,
+        ),
+    )
+    monkeypatch.setattr(
+        "infra.postgres.vector_retrieval.DATABASE_EMBEDDING_MODEL_ID",
+        malicious_text,
+    )
+    fake = FakeEmbeddingAdapter(malicious_profile, {malicious_text: vector_sentinel})
+    retriever = VectorRetriever(
+        EmbeddingGateway(fake),
+        PostgresVectorSearchAdapter(migrated_engine, malicious_profile),
+    )
+    before_counts = _document_row_counts(migrated_engine)
+    executed: list[tuple[str, object]] = []
+
+    def _capture(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        executed.append((statement, parameters))
+
+    event.listen(migrated_engine, "before_cursor_execute", _capture)
+    try:
+        result = retriever.retrieve(
+            malicious_text,
+            AuthorizationScope(),
+            KnowledgeFilters(),
+            limit=1,
+        )
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _capture)
+
+    assert [item.chunk_id for item in result] == [target_chunk.chunk_id]
+    assert unrelated_chunk.chunk_id not in {item.chunk_id for item in result}
+    assert malicious_text in result[0].excerpt
+    candidate_calls = [
+        (statement, parameters)
+        for statement, parameters in executed
+        if statement.lstrip().lower().startswith("select ")
+        and "document_chunk_embeddings" in statement.lower()
+    ]
+    assert len(candidate_calls) == 1
+    candidate_sql, candidate_parameters = candidate_calls[0]
+    assert malicious_text not in candidate_sql
+    assert database_vector_sentinel not in candidate_sql
+    assert isinstance(candidate_parameters, dict)
+    assert candidate_parameters["embedding_model"] == malicious_text
+    assert candidate_parameters["query_embedding"] == database_vector_sentinel
+    assert "query" not in candidate_parameters
+
+    forbidden_starts = (
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "ALTER ",
+        "DROP ",
+        "TRUNCATE ",
+        "COMMENT ",
+        "GRANT ",
+        "REVOKE ",
+    )
+    normalized_sql = [
+        " ".join(statement.upper().split()) for statement, _ in executed
+    ]
+    assert all(
+        not statement.startswith(forbidden_starts) for statement in normalized_sql
+    )
+    assert _document_row_counts(migrated_engine) == before_counts
+    _assert_all_tables_queryable(migrated_engine)
+
+
 def test_successful_vector_search_is_read_only_and_releases_its_connection(
     migrated_engine: Engine,
 ) -> None:
@@ -905,28 +1073,45 @@ def test_adapter_rejects_dimension_or_call_profile_mismatch_before_sql(
 
 def test_database_failure_uses_a_fixed_cause_free_vector_error(
     migrated_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unavailable_engine = create_engine(
-        migrated_engine.url.set(host="127.0.0.1", port=1),
-        connect_args={"connect_timeout": 1},
+    secret_query = "secret database query a19f"
+    secret_vector = (0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18)
+    secret_model = "secret-model-a19f"
+    secret_profile = EmbeddingProfile(model_id=secret_model, dimension=8)
+    monkeypatch.setattr(
+        "infra.postgres.vector_retrieval.DATABASE_EMBEDDING_MODEL_ID",
+        secret_model,
     )
-    adapter = PostgresVectorSearchAdapter(unavailable_engine, _PROFILE)
-    try:
-        with pytest.raises(
-            VectorRetrievalError, match="^vector retrieval unavailable$"
-        ) as captured:
-            adapter.search(
-                "secret database query",
-                _QUERY_VECTOR,
-                _PROFILE,
-                AuthorizationScope(),
-                KnowledgeFilters(),
-                10,
-            )
-    finally:
-        unavailable_engine.dispose()
 
-    assert "secret database query" not in str(captured.value)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
+        reserved_socket.bind(("127.0.0.1", 0))
+        unavailable_port = cast(tuple[str, int], reserved_socket.getsockname())[1]
+        unavailable_engine = create_engine(
+            migrated_engine.url.set(host="127.0.0.1", port=unavailable_port),
+            connect_args={"connect_timeout": 1},
+        )
+        pool = cast(Any, unavailable_engine.pool)
+        assert pool.checkedout() == 0
+        adapter = PostgresVectorSearchAdapter(unavailable_engine, secret_profile)
+        try:
+            with pytest.raises(VectorRetrievalError) as captured:
+                adapter.search(
+                    secret_query,
+                    secret_vector,
+                    secret_profile,
+                    AuthorizationScope(),
+                    KnowledgeFilters(),
+                    10,
+                )
+            assert pool.checkedout() == 0
+        finally:
+            unavailable_engine.dispose()
+
+    assert type(captured.value) is VectorRetrievalError
+    assert str(captured.value) == "vector retrieval unavailable"
+    for secret in (secret_query, repr(secret_vector), secret_model):
+        assert secret not in str(captured.value)
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None or captured.value.__suppress_context__
 
