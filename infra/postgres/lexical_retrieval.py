@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from uuid import UUID
-
 from sqlalchemy import bindparam, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,66 +13,23 @@ from infra.postgres.document_models import (
     DocumentModel,
     DocumentVersionModel,
 )
+from infra.postgres.retrieval_support import (
+    authorized_document_constraints,
+    evidence_excerpt,
+)
 from packages.contracts import AuthorizationScope, KnowledgeEvidence, KnowledgeFilters
 from services.retrieval.lexical import LexicalRetrievalError, LexicalSearchPort
 
 LEXICAL_FTS_WEIGHT = 0.7
 LEXICAL_TRIGRAM_WEIGHT = 0.3
 LEXICAL_STATEMENT_TIMEOUT_MS = 2000
-MAX_EVIDENCE_EXCERPT_CHARS = 2000
 _UNAVAILABLE = "lexical retrieval unavailable"
 _SIMPLE_CONFIG: ColumnClause[str] = literal_column("'simple'::regconfig")
-
-
-def _canonical_scope_uuids(values: Iterable[str]) -> tuple[UUID, ...]:
-    canonical: set[UUID] = set()
-    for value in values:
-        try:
-            parsed = UUID(value)
-        except ValueError:
-            continue
-        if str(parsed) == value.lower():
-            canonical.add(parsed)
-    return tuple(sorted(canonical, key=str))
 
 
 def _literal_ilike_pattern(query: str) -> str:
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
-
-
-def _casefold_match_span(text_value: str, query: str) -> tuple[int, int] | None:
-    folded_parts: list[str] = []
-    original_offsets: list[int] = []
-    for original_offset, character in enumerate(text_value):
-        folded_character = character.casefold()
-        folded_parts.append(folded_character)
-        original_offsets.extend([original_offset] * len(folded_character))
-
-    folded_query = query.casefold()
-    folded_match = "".join(folded_parts).find(folded_query)
-    if folded_match < 0 or not folded_query:
-        return None
-    match_end = folded_match + len(folded_query) - 1
-    return original_offsets[folded_match], original_offsets[match_end] + 1
-
-
-def _excerpt(text_value: str, query: str) -> str:
-    if len(text_value) <= MAX_EVIDENCE_EXCERPT_CHARS:
-        return text_value
-    match_span = _casefold_match_span(text_value, query)
-    if match_span is None:
-        start = 0
-    else:
-        match_start, match_end = match_span
-        centered_start = (
-            (match_start + match_end) // 2 - MAX_EVIDENCE_EXCERPT_CHARS // 2
-        )
-        start = max(
-            0,
-            min(centered_start, len(text_value) - MAX_EVIDENCE_EXCERPT_CHARS),
-        )
-    return text_value[start : start + MAX_EVIDENCE_EXCERPT_CHARS]
 
 
 class PostgresLexicalSearchAdapter(LexicalSearchPort):
@@ -104,6 +58,9 @@ class PostgresLexicalSearchAdapter(LexicalSearchPort):
             + LEXICAL_TRIGRAM_WEIGHT * trigram_score
         ).label("lexical_score")
 
+        authorization_predicates, authorization_parameters = (
+            authorized_document_constraints(user_scope, filters)
+        )
         predicates = [
             or_(
                 vector.op("@@")(plain_query),
@@ -111,51 +68,14 @@ class PostgresLexicalSearchAdapter(LexicalSearchPort):
                     bindparam("literal_pattern"), escape="\\"
                 ),
             ),
-            DocumentVersionModel.security_level
-            <= bindparam("scope_security_level"),
-            or_(
-                DocumentVersionModel.department.is_(None),
-                DocumentVersionModel.department.in_(
-                    bindparam("scope_departments", expanding=True)
-                ),
-            ),
-            or_(
-                DocumentVersionModel.ship_id.is_(None),
-                DocumentVersionModel.ship_id.in_(
-                    bindparam("scope_ship_ids", expanding=True)
-                ),
-            ),
-            or_(
-                DocumentVersionModel.project_id.is_(None),
-                DocumentVersionModel.project_id.in_(
-                    bindparam("scope_project_ids", expanding=True)
-                ),
-            ),
+            *authorization_predicates,
         ]
         parameters: dict[str, object] = {
+            **authorization_parameters,
             "query": query,
             "literal_pattern": _literal_ilike_pattern(query),
-            "scope_security_level": user_scope.security_level.value,
-            "scope_departments": tuple(sorted(user_scope.departments)),
-            "scope_ship_ids": _canonical_scope_uuids(user_scope.allowed_ship_ids),
-            "scope_project_ids": _canonical_scope_uuids(
-                user_scope.allowed_project_ids
-            ),
             "limit": limit,
         }
-        if filters.document_type is not None:
-            predicates.append(
-                DocumentVersionModel.document_type == bindparam("document_type")
-            )
-            parameters["document_type"] = filters.document_type.value
-        if filters.ship_id is not None:
-            predicates.append(DocumentVersionModel.ship_id == bindparam("ship_id"))
-            parameters["ship_id"] = filters.ship_id
-        if filters.project_id is not None:
-            predicates.append(
-                DocumentVersionModel.project_id == bindparam("project_id")
-            )
-            parameters["project_id"] = filters.project_id
 
         statement = (
             select(
@@ -215,7 +135,7 @@ class PostgresLexicalSearchAdapter(LexicalSearchPort):
                     section=row.section,
                     page=row.page,
                     source_uri=row.source_uri,
-                    excerpt=_excerpt(row.normalized_text, query),
+                    excerpt=evidence_excerpt(row.normalized_text, query),
                     retrieval_score=score,
                     lexical_score=score,
                 )

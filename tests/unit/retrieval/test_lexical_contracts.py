@@ -1,5 +1,7 @@
 """Public lexical retrieval contracts remain strict and transport-independent."""
 
+from __future__ import annotations
+
 import ast
 from pathlib import Path
 from typing import Any, cast
@@ -8,6 +10,10 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from infra.postgres.retrieval_support import (
+    authorized_document_constraints,
+    evidence_excerpt,
+)
 from packages.contracts import (
     AuthorizationScope,
     DocumentType,
@@ -16,6 +22,30 @@ from packages.contracts import (
     SecurityLevel,
 )
 from services.retrieval import LexicalRetriever, RetrievalValidationError
+
+VALID_UUID = "a1000000-0000-0000-0000-000000000001"
+BRACED_UUID = "{a1000000-0000-0000-0000-000000000001}"
+
+
+def test_shared_retrieval_support_canonicalizes_scope_ids_fail_closed() -> None:
+    scope = AuthorizationScope(
+        allowed_ship_ids={VALID_UUID, VALID_UUID.upper(), "not-a-uuid", BRACED_UUID}
+    )
+
+    _predicates, parameters = authorized_document_constraints(
+        scope, KnowledgeFilters()
+    )
+
+    assert parameters["scope_ship_ids"] == (UUID(VALID_UUID),)
+
+
+def test_shared_excerpt_preserves_unicode_fold_offsets() -> None:
+    text = "ß" * 1500 + "NEEDLE" + "x" * 2494
+
+    excerpt = evidence_excerpt(text, "NEEDLE")
+
+    assert len(excerpt) == 2000
+    assert "NEEDLE" in excerpt
 
 
 def _evidence(**overrides: Any) -> KnowledgeEvidence:
@@ -272,8 +302,6 @@ def _is_allowed_postgres_lexical_import(node: ast.Import | ast.ImportFrom) -> bo
         return False
     allowed_symbols = {
         "__future__": {"annotations"},
-        "collections.abc": {"Iterable"},
-        "uuid": {"UUID"},
         "sqlalchemy": {
             "bindparam",
             "func",
@@ -290,6 +318,10 @@ def _is_allowed_postgres_lexical_import(node: ast.Import | ast.ImportFrom) -> bo
             "DocumentChunkModel",
             "DocumentModel",
             "DocumentVersionModel",
+        },
+        "infra.postgres.retrieval_support": {
+            "authorized_document_constraints",
+            "evidence_excerpt",
         },
         "packages.contracts": {
             "AuthorizationScope",
@@ -348,3 +380,72 @@ def test_postgres_lexical_import_guard_rejects_unapproved_dependencies(
     malicious_source: str,
 ) -> None:
     assert not _source_uses_only_allowed_postgres_lexical_imports(malicious_source)
+
+
+def _is_allowed_retrieval_support_import(node: ast.Import | ast.ImportFrom) -> bool:
+    if isinstance(node, ast.Import):
+        return False
+    allowed_symbols = {
+        "__future__": {"annotations"},
+        "collections.abc": {"Iterable"},
+        "uuid": {"UUID"},
+        "sqlalchemy": {"bindparam", "or_"},
+        "sqlalchemy.sql.elements": {"ColumnElement"},
+        "infra.postgres.document_models": {"DocumentVersionModel"},
+        "packages.contracts": {"AuthorizationScope", "KnowledgeFilters"},
+    }
+    if node.level != 0 or node.module not in allowed_symbols:
+        return False
+    return all(
+        alias.asname is None
+        and alias.name != "*"
+        and alias.name in allowed_symbols[node.module]
+        for alias in node.names
+    )
+
+
+def _source_uses_only_allowed_retrieval_support_imports(source: str) -> bool:
+    tree = ast.parse(source)
+    top_level_import_ids = {
+        id(node) for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)
+    }
+    imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+    ]
+    return all(
+        id(node) in top_level_import_ids and _is_allowed_retrieval_support_import(node)
+        for node in imports
+    )
+
+
+def test_shared_retrieval_support_import_boundary_is_deny_by_default() -> None:
+    source = (
+        Path(__file__).resolve().parents[3]
+        / "infra/postgres/retrieval_support.py"
+    ).read_text(encoding="utf-8")
+
+    assert _source_uses_only_allowed_retrieval_support_imports(source)
+
+
+@pytest.mark.parametrize(
+    "malicious_source",
+    [
+        "if enabled:\n    from sqlalchemy import bindparam\n",
+        "from .document_models import DocumentVersionModel\n",
+        "from sqlalchemy import bindparam as parameter\n",
+        "from sqlalchemy import *\n",
+        "from services.ingestion import Parser\n",
+        "from apps.api import app\n",
+        "from services.wiki import WikiSearch\n",
+        "from services.agent import ShipyardAgent\n",
+        "from openai import OpenAI\n",
+        "from adapters.erp import ErpAdapter\n",
+        "from packages.contracts import UserContext\n",
+    ],
+)
+def test_shared_retrieval_support_import_guard_rejects_unapproved_dependencies(
+    malicious_source: str,
+) -> None:
+    assert not _source_uses_only_allowed_retrieval_support_imports(malicious_source)
