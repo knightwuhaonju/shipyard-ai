@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite, sqrt
@@ -11,9 +10,10 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import event, inspect
 from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from adapters.embedding import FakeEmbeddingAdapter
@@ -473,40 +473,73 @@ def test_vector_search_applies_document_type_filter(
 
 
 @pytest.mark.parametrize("dimension", ["ship", "project"])
-@pytest.mark.parametrize("authorized", [True, False])
 def test_ship_and_project_filters_only_narrow_the_authorized_scope(
     migrated_engine: Engine,
     dimension: str,
-    authorized: bool,
 ) -> None:
     resource_id = _id(3, 40 if dimension == "ship" else 41)
     other_id = _id(3, 50 if dimension == "ship" else 51)
-    (chunk,) = _persist_records(
+    selected_chunk, rejected_chunk = _persist_records(
         migrated_engine,
         _ChunkSpec(
             key=40,
-            text="scoped vector filter evidence",
+            text="selected scoped vector filter evidence",
             ship_id=resource_id if dimension == "ship" else None,
             project_id=resource_id if dimension == "project" else None,
         ),
+        _ChunkSpec(
+            key=42,
+            text="rejected but authorized vector filter evidence",
+            ship_id=other_id if dimension == "ship" else None,
+            project_id=other_id if dimension == "project" else None,
+        ),
     )
-    allowed_id = resource_id if authorized else other_id
     scope = AuthorizationScope(
-        allowed_ship_ids={str(allowed_id)} if dimension == "ship" else set(),
+        allowed_ship_ids=(
+            {str(resource_id), str(other_id)} if dimension == "ship" else set()
+        ),
         allowed_project_ids=(
-            {str(allowed_id)} if dimension == "project" else set()
+            {str(resource_id), str(other_id)}
+            if dimension == "project"
+            else set()
         ),
     )
     filters = KnowledgeFilters(
         ship_id=resource_id if dimension == "ship" else None,
         project_id=resource_id if dimension == "project" else None,
     )
+    executed: list[tuple[str, object]] = []
 
-    result = _retrieve(migrated_engine, scope=scope, filters=filters)
+    def _capture(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        executed.append((statement, parameters))
 
-    assert [item.chunk_id for item in result] == (
-        [chunk.chunk_id] if authorized else []
-    )
+    event.listen(migrated_engine, "before_cursor_execute", _capture)
+    try:
+        result = _retrieve(migrated_engine, scope=scope, filters=filters)
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _capture)
+
+    assert [item.chunk_id for item in result] == [selected_chunk.chunk_id]
+    assert rejected_chunk.chunk_id not in {item.chunk_id for item in result}
+    candidate_calls = [
+        (statement, parameters)
+        for statement, parameters in executed
+        if statement.lstrip().lower().startswith("select ")
+        and "document_chunk_embeddings" in statement.lower()
+    ]
+    assert len(candidate_calls) == 1
+    candidate_sql, candidate_parameters = candidate_calls[0]
+    filter_parameter = f"{dimension}_id"
+    assert f"%({filter_parameter})s" in candidate_sql
+    assert isinstance(candidate_parameters, dict)
+    assert candidate_parameters[filter_parameter] == resource_id
 
 
 @pytest.mark.parametrize("dimension", ["ship", "project"])
@@ -516,13 +549,19 @@ def test_out_of_scope_filter_returns_zero_without_vector_fallback(
 ) -> None:
     resource_id = _id(3, 60)
     other_id = _id(3, 61)
-    _persist_records(
+    _filtered_chunk, fallback_chunk = _persist_records(
         migrated_engine,
         _ChunkSpec(
             key=41,
             text="out of scope vector filter",
             ship_id=resource_id if dimension == "ship" else None,
             project_id=resource_id if dimension == "project" else None,
+        ),
+        _ChunkSpec(
+            key=43,
+            text="authorized candidate must not be returned by fallback",
+            ship_id=other_id if dimension == "ship" else None,
+            project_id=other_id if dimension == "project" else None,
         ),
     )
     scope = AuthorizationScope(
@@ -533,17 +572,20 @@ def test_out_of_scope_filter_returns_zero_without_vector_fallback(
         ship_id=resource_id if dimension == "ship" else None,
         project_id=resource_id if dimension == "project" else None,
     )
-    executed: list[str] = []
+    assert [
+        item.chunk_id for item in _retrieve(migrated_engine, scope=scope)
+    ] == [fallback_chunk.chunk_id]
+    executed: list[tuple[str, object]] = []
 
     def _capture(
         _connection: Any,
         _cursor: Any,
         statement: str,
-        _parameters: object,
+        parameters: object,
         _context: Any,
         _executemany: bool,
     ) -> None:
-        executed.append(statement)
+        executed.append((statement, parameters))
 
     event.listen(migrated_engine, "before_cursor_execute", _capture)
     try:
@@ -551,14 +593,19 @@ def test_out_of_scope_filter_returns_zero_without_vector_fallback(
     finally:
         event.remove(migrated_engine, "before_cursor_execute", _capture)
 
-    candidate_selects = [
-        statement
-        for statement in executed
+    candidate_calls = [
+        (statement, parameters)
+        for statement, parameters in executed
         if statement.lstrip().lower().startswith("select ")
         and "document_chunk_embeddings" in statement.lower()
     ]
     assert result == []
-    assert len(candidate_selects) == 1
+    assert len(candidate_calls) == 1
+    candidate_sql, candidate_parameters = candidate_calls[0]
+    filter_parameter = f"{dimension}_id"
+    assert f"%({filter_parameter})s" in candidate_sql
+    assert isinstance(candidate_parameters, dict)
+    assert candidate_parameters[filter_parameter] == resource_id
 
 
 def test_vector_limit_returns_only_the_nearest_candidate(
@@ -1071,47 +1118,68 @@ def test_adapter_rejects_dimension_or_call_profile_mismatch_before_sql(
     assert captured.value.__cause__ is None
 
 
-def test_database_failure_uses_a_fixed_cause_free_vector_error(
+def test_database_failure_after_checkout_releases_connection_with_fixed_error(
     migrated_engine: Engine,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret_query = "secret database query a19f"
     secret_vector = (0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18)
-    secret_model = "secret-model-a19f"
-    secret_profile = EmbeddingProfile(model_id=secret_model, dimension=8)
-    monkeypatch.setattr(
-        "infra.postgres.vector_retrieval.DATABASE_EMBEDDING_MODEL_ID",
-        secret_model,
-    )
+    secret_driver_error = "secret driver failure a19f"
+    pool = cast(Any, migrated_engine.pool)
+    assert pool.checkedout() == 0
+    checked_out_during_failure: list[int] = []
+    candidate_attempts: list[str] = []
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reserved_socket:
-        reserved_socket.bind(("127.0.0.1", 0))
-        unavailable_port = cast(tuple[str, int], reserved_socket.getsockname())[1]
-        unavailable_engine = create_engine(
-            migrated_engine.url.set(host="127.0.0.1", port=unavailable_port),
-            connect_args={"connect_timeout": 1},
+    def _fail_candidate_after_checkout(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        if (
+            statement.lstrip().lower().startswith("select ")
+            and "document_chunk_embeddings" in statement.lower()
+        ):
+            candidate_attempts.append(statement)
+            checked_out_during_failure.append(pool.checkedout())
+            raise SQLAlchemyError(secret_driver_error)
+
+    adapter = PostgresVectorSearchAdapter(migrated_engine, _PROFILE)
+    event.listen(
+        migrated_engine,
+        "before_cursor_execute",
+        _fail_candidate_after_checkout,
+    )
+    try:
+        with pytest.raises(VectorRetrievalError) as captured:
+            adapter.search(
+                secret_query,
+                secret_vector,
+                _PROFILE,
+                AuthorizationScope(),
+                KnowledgeFilters(),
+                10,
+            )
+    finally:
+        event.remove(
+            migrated_engine,
+            "before_cursor_execute",
+            _fail_candidate_after_checkout,
         )
-        pool = cast(Any, unavailable_engine.pool)
-        assert pool.checkedout() == 0
-        adapter = PostgresVectorSearchAdapter(unavailable_engine, secret_profile)
-        try:
-            with pytest.raises(VectorRetrievalError) as captured:
-                adapter.search(
-                    secret_query,
-                    secret_vector,
-                    secret_profile,
-                    AuthorizationScope(),
-                    KnowledgeFilters(),
-                    10,
-                )
-            assert pool.checkedout() == 0
-        finally:
-            unavailable_engine.dispose()
 
     assert type(captured.value) is VectorRetrievalError
     assert str(captured.value) == "vector retrieval unavailable"
-    for secret in (secret_query, repr(secret_vector), secret_model):
+    for secret in (
+        secret_query,
+        repr(secret_vector),
+        _MODEL_ID,
+        secret_driver_error,
+    ):
         assert secret not in str(captured.value)
+    assert len(candidate_attempts) == 1
+    assert checked_out_during_failure == [1]
+    assert pool.checkedout() == 0
     assert captured.value.__cause__ is None
     assert captured.value.__context__ is None or captured.value.__suppress_context__
 

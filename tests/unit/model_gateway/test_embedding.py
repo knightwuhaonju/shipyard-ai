@@ -274,6 +274,39 @@ def _source_uses_only_allowed_imports(source: str, *, fake: bool) -> bool:
     )
 
 
+_ALLOWED_FAKE_DIRECT_CALLS = {
+    "EmbeddingAdapterError",
+    "ValueError",
+    "float",
+    "isinstance",
+    "len",
+    "tuple",
+    "type",
+}
+_ALLOWED_FAKE_METHOD_CALLS = {
+    "_valid_entry",
+    "append",
+    "items",
+    "strip",
+}
+
+
+def _fake_source_uses_only_safe_calls(source: str) -> bool:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            if node.func.id not in _ALLOWED_FAKE_DIRECT_CALLS:
+                return False
+        elif isinstance(node.func, ast.Attribute):
+            if node.func.attr not in _ALLOWED_FAKE_METHOD_CALLS:
+                return False
+        else:
+            return False
+    return True
+
+
 @pytest.mark.parametrize(
     ("relative_path", "fake"),
     [
@@ -289,6 +322,33 @@ def test_embedding_source_import_boundaries_are_deny_by_default(
     )
 
     assert _source_uses_only_allowed_imports(source, fake=fake)
+
+
+def test_fake_embedding_call_boundary_is_deny_by_default() -> None:
+    source = (
+        Path(__file__).resolve().parents[3] / "adapters/embedding/fake.py"
+    ).read_text(encoding="utf-8")
+
+    assert _fake_source_uses_only_safe_calls(source)
+
+
+@pytest.mark.parametrize(
+    "malicious_source",
+    [
+        'open("/tmp/fake-embedding")\n',
+        '__import__("socket")\n',
+        '__import__("pathlib").Path("/tmp/data").read_text()\n',
+        '__import__("socket").create_connection(("127.0.0.1", 1))\n',
+        '__import__("subprocess").run(("true",))\n',
+        '__import__("os").getenv("SECRET")\n',
+        'getattr(__builtins__, "open")("/tmp/fake-embedding")\n',
+        'eval("1 + 1")\n',
+    ],
+)
+def test_fake_embedding_call_guard_rejects_dynamic_external_entry_points(
+    malicious_source: str,
+) -> None:
+    assert not _fake_source_uses_only_safe_calls(malicious_source)
 
 
 @pytest.mark.parametrize(
