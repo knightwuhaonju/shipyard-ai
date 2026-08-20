@@ -787,6 +787,72 @@ def test_candidate_sql_contains_acl_limit_read_only_and_local_timeout(
     assert order_position < limit_position
 
 
+def test_sql_injection_payload_is_bound_and_cannot_mutate_or_broaden_search(
+    migrated_engine: Engine,
+) -> None:
+    payload = "x'); DROP TABLE documents; --"
+    matching_chunk, unrelated_chunk = _persist_records(
+        migrated_engine,
+        _ChunkSpec(key=89, text=f"Literal adversarial text: {payload}"),
+        _ChunkSpec(key=90, text="Unrelated public global synthetic guidance"),
+    )
+    before_counts = _document_row_counts(migrated_engine)
+    assert before_counts == (2, 2, 2)
+    executed: list[tuple[str, object]] = []
+
+    def _capture(
+        _connection: Any,
+        _cursor: Any,
+        statement: str,
+        parameters: object,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        executed.append((statement, parameters))
+
+    event.listen(migrated_engine, "before_cursor_execute", _capture)
+    try:
+        result = _retrieve(migrated_engine, payload)
+    finally:
+        event.remove(migrated_engine, "before_cursor_execute", _capture)
+
+    candidate_calls = [
+        (statement, parameters)
+        for statement, parameters in executed
+        if statement.lstrip().lower().startswith("select ")
+        and "document_chunks" in statement.lower()
+    ]
+    assert [item.chunk_id for item in result] == [matching_chunk.chunk_id]
+    assert unrelated_chunk.chunk_id not in {item.chunk_id for item in result}
+    assert len(candidate_calls) == 1
+    candidate_sql, candidate_parameters = candidate_calls[0]
+    assert payload not in candidate_sql
+    assert isinstance(candidate_parameters, dict)
+    assert candidate_parameters["query"] == payload
+    assert candidate_parameters["literal_pattern"] == f"%{payload}%"
+    assert " escape " in " ".join(candidate_sql.lower().split())
+
+    forbidden_statement_starts = (
+        "INSERT ",
+        "UPDATE ",
+        "DELETE ",
+        "CREATE ",
+        "ALTER ",
+        "DROP ",
+        "TRUNCATE ",
+        "COMMENT ",
+        "GRANT ",
+        "REVOKE ",
+    )
+    assert all(
+        not " ".join(statement.upper().split()).startswith(
+            forbidden_statement_starts
+        )
+        for statement, _ in executed
+    )
+    assert _document_row_counts(migrated_engine) == before_counts
+
+
 def test_successful_search_emits_no_mutation_and_releases_its_connection(
     migrated_engine: Engine,
 ) -> None:
